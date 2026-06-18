@@ -35,7 +35,6 @@ if version < 600
   syntax clear
 elseif exists("b:current_syntax")
   finish
-  w
 endif
 
 
@@ -59,11 +58,7 @@ syntax include @nowebIncludedShell syntax/sh.vim
 " The reference to a chunk of code in another code chunk.
 syntax match nowebCodeRef contained /<<.>>\|<<[^ ].*[^ ]>>/
 
-" The code text within a code chunk.
-syntax region nowebCodeBody contained start=/>>=.\|>>=$/lc=3 end=/^@ \|^@$/me=e-3 contains=nowebCodeRef
-
-syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2 
-syn region  nowebXX     start="|"hs=s+1 end="|"he=e-1 
+syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2
 syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT
 
 " NOWEB code chunks are defined by <<chunk_name>>=
@@ -83,11 +78,9 @@ syntax match nowebStartText /^@ \|^@$/
 if !exists("did_noweb_syntax_inits")
   let did_noweb_syntax_inits = 1
   " The default methods for highlighting. Can be overridden later.
-  hi link nowebCodeRef Type
-  hi link nowebCodeBody Comment
-  hi link nowebStartText Constant
+  hi def link nowebCodeRef Type
+  hi def link nowebStartText Constant
   hi def link nowebTT     Constant
-  hi def link nowebXX     Constant
   hi def link nowebName     Type
 endif
 
