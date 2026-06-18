@@ -2,12 +2,16 @@
 " Vim syntax file
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
+" Maintainer:		Daniel Bosk <daniel@bosk.se>
 " Date:			2008-01-26
-" Version:		1.2
+" Version:		1.3
 " Derived from: 	cweb.vim by Andreas Scherer
 
 " History
 "
+" v1.3: Detect each code chunk's language (autolang-style: filename-like
+"       chunk names, #! lines, and propagation along <<use>> edges) and
+"       highlight chunk bodies in that language.  See autoload/noweb.vim.
 " v1.2: Major revision, fixed bug with modern "tex.vim"
 " v1.1: Corrected `current_syntax = "noweb"' to
 "                 `current_syntax = "nw"'
@@ -47,29 +51,19 @@ else
   unlet b:current_syntax
 endif
 
-syntax include @nowebIncludedC syntax/c.vim
-syntax include @nowebIncludedCPP syntax/cpp.vim
-syntax include @nowebIncludedOcaml syntax/ocaml.vim
-syntax include @nowebIncludedMakefile syntax/make.vim
-syntax include @nowebIncludedConf syntax/conf.vim
-syntax include @nowebIncludedPython syntax/python.vim
-syntax include @nowebIncludedShell syntax/sh.vim
-
 " The reference to a chunk of code in another code chunk.
 syntax match nowebCodeRef contained /<<.>>\|<<[^ ].*[^ ]>>/
 
 syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2
 syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT
 
-" NOWEB code chunks are defined by <<chunk_name>>=
-" and ended by the next "@" (not a "@@"!) in the first column of a line.
-syntax region nowebCode start=/<<.>>=\|<<[^ ].*[^ ]>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedConf, nowebName containedin=tex.*Zone
-synta region nowebCode start=/^<<[^ ].*\.\(c\|h\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedC, nowebName containedin=tex.*Zone
-syntax region nowebCode start=/<<[^ ].*\.\(ml\|mli\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedOcaml, nowebName containedin=tex.*Zone
-syntax region nowebCode start=/<<[^ ].*\.\(cc\|cpp\|C\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedCpp, nowebName containedin=tex.*Zone
-syntax region nowebCode start=/<<Makefile>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedMakefile, nowebName containedin=tex.*Zone
-syntax region nowebCode start=/<<[^ ].*\.\(py\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedPython, nowebName containedin=tex.*Zone
-syntax region nowebCode start=/<<[^ ].*\.\(sh\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedShell, nowebName containedin=tex.*Zone
+" NOWEB code chunks are defined by <<chunk_name>>= and ended by the next
+" "@" (not a "@@"!) in the first column of a line.  This is the fallback
+" region for chunks whose language could not be inferred: its body is
+" left unhighlighted (chunk references are still marked).  Language-aware
+" regions are layered on top of it by noweb#refresh() below, which is why
+" they take priority -- they are defined later.
+syntax region nowebCode start=/^<<.\{-}>>=/ end=/^@ \|^@$/me=e-3 contains=nowebName containedin=tex.*Zone
 
 " Here, we mark the beginning of a new text chunk.
 " syntax match nowebStartText /<<.>>=\|<<[^ ].*[^ ]>>=/
@@ -85,5 +79,20 @@ if !exists("did_noweb_syntax_inits")
 endif
 
 let b:current_syntax = "noweb"
+
+" Infer chunk languages and build the per-language regions, then keep them
+" up to date: on every load (here), after each write, and on demand via
+" :NowebSyncLang.  A full re-source (e.g. :edit) wipes included clusters,
+" so reset the bookkeeping before the initial inference.
+let b:noweb_included = {}
+let b:noweb_lang_groups = []
+call noweb#refresh()
+
+command! -buffer NowebSyncLang call noweb#refresh()
+
+augroup nowebLangSync
+  autocmd! * <buffer>
+  autocmd BufWritePost <buffer> call noweb#refresh()
+augroup END
 
 " vim: ts=8
