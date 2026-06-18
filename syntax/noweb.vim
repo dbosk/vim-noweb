@@ -53,6 +53,8 @@ syntax include @nowebIncludedCPP syntax/cpp.vim
 syntax include @nowebIncludedOcaml syntax/ocaml.vim
 syntax include @nowebIncludedMakefile syntax/make.vim
 syntax include @nowebIncludedConf syntax/conf.vim
+syntax include @nowebIncludedPython syntax/python.vim
+syntax include @nowebIncludedShell syntax/sh.vim
 
 " The reference to a chunk of code in another code chunk.
 syntax match nowebCodeRef contained /<<.>>\|<<[^ ].*[^ ]>>/
@@ -71,6 +73,8 @@ synta region nowebCode start=/^<<[^ ].*\.\(c\|h\)>>=/ end=/^@ \|^@$/me=e-3 conta
 syntax region nowebCode start=/<<[^ ].*\.\(ml\|mli\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedOcaml, nowebName containedin=tex.*Zone
 syntax region nowebCode start=/<<[^ ].*\.\(cc\|cpp\|C\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedCpp, nowebName containedin=tex.*Zone
 syntax region nowebCode start=/<<Makefile>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedMakefile, nowebName containedin=tex.*Zone
+syntax region nowebCode start=/<<[^ ].*\.\(py\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedPython, nowebName containedin=tex.*Zone
+syntax region nowebCode start=/<<[^ ].*\.\(sh\)>>=/ end=/^@ \|^@$/me=e-3 contains=@nowebIncludedShell, nowebName containedin=tex.*Zone
 
 " Here, we mark the beginning of a new text chunk.
 " syntax match nowebStartText /<<.>>=\|<<[^ ].*[^ ]>>=/
