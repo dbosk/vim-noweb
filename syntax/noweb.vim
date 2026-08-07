@@ -62,6 +62,16 @@ endif
 syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2 oneline containedin=tex.*
 syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT containedin=tex.*
 
+" When [[...]] quoting follows a tex command taking an optional argument
+" (\begin{env}, \item, ...), the tex syntax claims the first [ as the
+" argument's opening delimiter via a nextgroup chain, which has priority
+" over any ordinary item -- and a % inside the quoting then comments out
+" the ]], leaving the option region open for the rest of the file.
+" Recover from inside the stolen bracket: consume the orphaned [content]
+" (which only exists in [X]] shapes, hence the lookahead) so the trailing
+" ] closes the option region on the same line.
+syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1 contained containedin=tex.*Opt,tex.*Label
+
 " NOWEB code chunks are defined by <<chunk_name>>= and ended by the next
 " "@" (not a "@@"!) in the first column of a line, or implicitly by the
 " next chunk definition.  Both ends use me=s-1 so the terminator itself is
@@ -91,6 +101,7 @@ syntax match nowebStartText /^@\%( \|$\)/ containedin=tex.*
 " The default methods for highlighting. Can be overridden later.
 hi def link nowebStartText Constant
 hi def link nowebTT     Constant
+hi def link nowebTTOrphan nowebTT
 hi def link nowebName     Type
 hi def link nowebChunkRef nowebName
 
