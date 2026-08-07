@@ -1,0 +1,15 @@
+# The tangled .vim files ARE committed (the plugin must work from a
+# bare clone); only the woven document and LaTeX build debris are not.
+vim-noweb.tex
+vim-noweb.pdf
+ltxobj/
+_minted*
+*.data.minted
+*.pyg
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
