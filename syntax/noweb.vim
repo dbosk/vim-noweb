@@ -3,12 +3,17 @@
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <daniel@bosk.se>
-" Date:			2008-01-26
-" Version:		1.3
+" Date:			2026-08-07
+" Version:		1.4
 " Derived from: 	cweb.vim by Andreas Scherer
 
 " History
 "
+" v1.4: Make highlighting reliable: sync from start (included language
+"       syntaxes used to hijack the buffer's sync rules), matchgroup on
+"       chunk headers (sh here-docs used to eat chunk bodies), implicit
+"       chunk termination at the next <<name>>=, oneline [[...]], and
+"       unconditional hi def links (they survive :syntax off/on now).
 " v1.3: Detect each code chunk's language (autolang-style: filename-like
 "       chunk names, #! lines, and propagation along <<use>> edges) and
 "       highlight chunk bodies in that language.  See autoload/noweb.vim.
@@ -51,32 +56,43 @@ else
   unlet b:current_syntax
 endif
 
-" The reference to a chunk of code in another code chunk.
-syntax match nowebCodeRef contained /<<.>>\|<<[^ ].*[^ ]>>/
-
-syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2
-syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT
+" containedin=tex.* lets these match even when a tex region has swallowed
+" the surrounding prose (e.g. an unclosed optional-argument [ ... ), which
+" vimtex can open across lines via nextgroup chains.
+syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2 oneline containedin=tex.*
+syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT containedin=tex.*
 
 " NOWEB code chunks are defined by <<chunk_name>>= and ended by the next
-" "@" (not a "@@"!) in the first column of a line.  This is the fallback
+" "@" (not a "@@"!) in the first column of a line, or implicitly by the
+" next chunk definition.  Both ends use me=s-1 so the terminator itself is
+" left for the following item (nowebStartText or the next chunk region).
+" The header is highlighted via matchgroup, which also keeps items of an
+" included language syntax from matching inside it.  This is the fallback
 " region for chunks whose language could not be inferred: its body is
 " left unhighlighted (chunk references are still marked).  Language-aware
 " regions are layered on top of it by noweb#refresh() below, which is why
-" they take priority -- they are defined later.
-syntax region nowebCode start=/^<<.\{-}>>=/ end=/^@ \|^@$/me=e-3 contains=nowebName containedin=tex.*Zone
+" they take priority -- they are defined later.  nowebChunkRef is also
+" defined there, after the language includes, so that it outranks them.
+" containedin=tex.* guarantees a chunk header always starts a chunk, even
+" inside a runaway tex region (see nowebTT above); the tex regions lack
+" keepend, so a contained chunk safely obscures their end patterns.
+syntax region nowebCode
+      \ matchgroup=nowebName start=/^<<.\{-}>>=\s*$/
+      \ matchgroup=NONE
+      \ end=/^@\%( \|$\)/me=s-1
+      \ end=/^<<.\{-}>>=\s*$/me=s-1
+      \ keepend
+      \ contains=nowebChunkRef,@NoSpell
+      \ containedin=tex.*
 
 " Here, we mark the beginning of a new text chunk.
-" syntax match nowebStartText /<<.>>=\|<<[^ ].*[^ ]>>=/
-syntax match nowebStartText /^@ \|^@$/
+syntax match nowebStartText /^@\%( \|$\)/ containedin=tex.*
 
-if !exists("did_noweb_syntax_inits")
-  let did_noweb_syntax_inits = 1
-  " The default methods for highlighting. Can be overridden later.
-  hi def link nowebCodeRef Type
-  hi def link nowebStartText Constant
-  hi def link nowebTT     Constant
-  hi def link nowebName     Type
-endif
+" The default methods for highlighting. Can be overridden later.
+hi def link nowebStartText Constant
+hi def link nowebTT     Constant
+hi def link nowebName     Type
+hi def link nowebChunkRef nowebName
 
 let b:current_syntax = "noweb"
 

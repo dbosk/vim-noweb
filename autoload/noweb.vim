@@ -205,7 +205,9 @@ function! noweb#refresh() abort
   let l:langs = s:infer_languages()
   let l:bylang = {}
   for [l:name, l:lang] in items(l:langs)
-    if l:lang ==# s:CONFLICT || l:lang ==# 'text'
+    " 'tex' is skipped: the buffer's outer syntax already is tex, and
+    " re-including it as a cluster re-runs its sync/spell setup mid-refresh.
+    if l:lang ==# s:CONFLICT || l:lang ==# 'text' || l:lang ==# 'tex'
       continue
     endif
     let l:bylang[l:lang] = get(l:bylang, l:lang, []) + [l:name]
@@ -220,11 +222,34 @@ function! noweb#refresh() abort
     let l:i += 1
     let l:grp = 'nowebCodeLang' . l:i
     let l:alt = join(map(copy(l:names), 's:re_escape(v:val)'), '\|')
+    " matchgroup= keeps included items (e.g. sh.vim's here-doc rule, which
+    " matches <<word) from ever firing on the header line; me=s-1 on both
+    " ends leaves the terminator unconsumed, so a following chunk header
+    " both ends this region and starts the next one.
     execute 'syntax region ' . l:grp
-          \ . ' start=/^<<\%(' . l:alt . '\)>>=/'
-          \ . ' end=/^@ \|^@$/me=e-3 keepend'
-          \ . ' contains=@' . l:cluster . ',nowebName'
-          \ . ' containedin=tex.*Zone'
+          \ . ' matchgroup=nowebName start=/^<<\%(' . l:alt . '\)>>=\s*$/'
+          \ . ' matchgroup=NONE'
+          \ . ' end=/^@\%( \|$\)/me=s-1'
+          \ . ' end=/^<<.\{-}>>=\s*$/me=s-1'
+          \ . ' keepend'
+          \ . ' contains=@' . l:cluster . ',nowebChunkRef,@NoSpell'
+          \ . ' containedin=tex.*'
     call add(b:noweb_lang_groups, l:grp)
   endfor
+
+  " Must be (re)defined after every :syntax include above: at the same
+  " start position the last-defined item wins (:h syn-priority), which is
+  " what lets chunk refs beat e.g. shHereDoc's <<-pattern inside sh chunks.
+  " First/last name chars must be non-space, so `cat <<EOF >> log` stays a
+  " here-doc.  syntax clear keeps the group id (contains= refs stay valid)
+  " while preventing pattern accumulation across refreshes.
+  silent! syntax clear nowebChunkRef
+  syntax match nowebChunkRef /<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/ contained contains=nowebTT
+
+  " Included syntax files install buffer-global sync rules (pythonSync
+  " grouphere on ^def, make's groupthere on ^[^\t#], small minlines) that
+  " re-sync this buffer wrongly while scrolling.  Drop them and parse from
+  " the top; noweb sources are small.
+  syntax sync clear
+  syntax sync fromstart
 endfunction
