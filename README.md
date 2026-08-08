@@ -38,3 +38,9 @@ every literal `<<` or `>>` inside a code chunk is escaped as `@<<` /
 Building needs [noweb](https://github.com/dbosk/noweb) (the fork
 providing `autolang` and `tominted` for the weave); `make
 vim-noweb.pdf` additionally needs `latexmk` and minted.
+
+## License
+
+MIT (see `LICENSE`, which also tangles from `vim-noweb.nw`).  The
+plugin descends from the `nw.vim` of Xun Gong and Dirk Baechle
+(vim.org script 2129).

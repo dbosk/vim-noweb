@@ -30,11 +30,16 @@
   vim-noweb: reliable noweb syntax highlighting for Vim
 }
 \author{%
-  Daniel Bosk
+  Daniel Bosk\thanks{%
+    The plugin descends from the \texttt{nw.vim} of Xun Gong and Dirk
+    Baechle, mirrored from vim.org script 2129.}
 }
 
 \begin{document}
 \maketitle
+\vfill
+\inputminted[numbers=none]{text}{LICENSE}
+\clearpage
 \tableofcontents
 \clearpage
 
@@ -52,17 +57,30 @@ marks the noweb markup---chunk headers, chunk references and
 chunk's own language, which it infers the same way noweb's
 \enquote{autolang} filter does.
 
-The plugin descends from the \texttt{nw.vim} of Xun Gong and Dirk
-Baechle (v1.0--1.2, mirrored from vim.org script 2129).  Version 1.3
-added the per-chunk language inference; version 1.4 made the
-highlighting reliable by defending against the included language
-syntaxes and against runaway \TeX{} regions.  The rationale for those
-defences is the bulk of this document.
+The plugin's lineage, version by version:
 
-Everything in this repository tangles from this file: the three files
-of the plugin are the root chunks, named after their paths in the
-plugin tree---[[syntax/noweb.vim]], [[autoload/noweb.vim]] and
-[[ftdetect/noweb.vim]].  The tangled files are committed
+\begin{description}
+\item[v1.0--v1.2] the original \texttt{nw.vim} of Xun Gong and Dirk
+  Baechle, mirrored from vim.org script 2129.
+\item[v1.3] per-chunk language inference, ported from noweb's
+  \enquote{autolang} filter.
+\item[v1.4] reliable highlighting: defences against the included
+  language syntaxes and against runaway \TeX{} regions.  The
+  rationale for those defences is the bulk of this document.
+\end{description}
+
+Everything in this repository tangles from this file.  The plugin's
+three files are the root chunks, named after their paths in the
+plugin tree:
+
+\begin{itemize}
+\item [[syntax/noweb.vim]],
+\item [[autoload/noweb.vim]], and
+\item [[ftdetect/noweb.vim]];
+\end{itemize}
+
+the [[LICENSE]] tangles from here as well
+(\cref{sec:building}).  The tangled files are committed
 alongside this source---a deliberate deviation from the usual
 never-commit-generated rule, because a Vim plugin must work from a
 bare [[git clone]]; plugin managers do not run notangle.
@@ -105,20 +123,24 @@ decision below traces back to one of them:
 \begin{description}
 \item[Definition order is priority.]  When several syntax items can
   start at the same position, the \emph{last defined} wins
-  (\texttt{:h syn-priority}).  This is why the language regions are
-  built \emph{after} the fallback region (so chunk headers start the
-  language region, not the fallback), and why [[nowebChunkRef]] must
-  be redefined after every [[:syntax include]] (so chunk references
-  inside code beat lookalike items of the included language).
+  (\texttt{:h syn-priority}).  We exploit this deliberately, twice:
+  the language-aware regions are built after the fallback region, so
+  a chunk header starts a language region rather than the fallback
+  (\cref{sec:fallback,sec:refresh}); and the item marking chunk
+  references inside code is redefined after every included language,
+  so it beats that language's lookalike patterns (\cref{sec:refresh}).
 \item[Included syntaxes are hostile guests.]  [[:syntax include]]
-  imports another filetype's rules wholesale.  Two kinds of guests
-  caused real breakage: pattern items that match noweb markup (the
-  shell syntax's here-doc rule fires on [[@<<word]], eating whole chunk
-  bodies as strings), and \texttt{syn sync} rules, which are
-  buffer-global and re-sync the buffer as if mid-chunk lines were
-  top-level prose.  The defences are [[matchgroup]] on chunk headers,
-  the late-defined [[nowebChunkRef]], and discarding all imported sync
-  rules in favour of syncing from the start of the file.
+  imports another filetype's rules wholesale, and some of them misfire
+  on noweb markup.  The shell syntax, for instance, reads [[@<<word]]
+  as the start of a here-document string---on a chunk header line
+  that used to paint the whole chunk body as one string.  Sync rules
+  come along too, and they are buffer-global: they tell Vim where it
+  may restart parsing when scrolling, and the imported rules made it
+  restart as if mid-chunk lines were top-level prose.  The defences
+  are [[matchgroup]] on chunk headers (\cref{sec:fallback}), the
+  late-defined chunk-reference item, and discarding every imported
+  sync rule in favour of syncing from the start of the file (both in
+  \cref{sec:refresh}).
 \end{description}
 
 There is a third, external adversary: the \TeX{} base syntax itself
@@ -126,7 +148,7 @@ can open a multi-line region in prose (an optional argument, a group)
 that swallows everything that follows, chunk headers included.  The
 chunk regions therefore carry [[containedin=tex.*]] so a header
 \emph{always} starts a chunk, and a small recovery item closes stolen
-[[[[...]]]] quotes.  Both are explained with the syntax file.
+[[[[...]]]] quotes (\cref{sec:quoting,sec:orphan}).
 
 \section{Filetype detection}
 
@@ -254,6 +276,7 @@ endif
 @
 
 \subsection{Quoting and chunk names in prose}
+\label{sec:quoting}
 
 Noweb prose quotes code as [[[[...]]]] and may mention chunks as
 [[@<<name@>>]]; both get their own items.  Two details are load-bearing:
@@ -281,6 +304,7 @@ syn region  nowebName   start="@<<" end="@>>" oneline contains=nowebTT contained
 @
 
 \subsection{Recovering quoting stolen by option arguments}
+\label{sec:orphan}
 
 One adversary cannot be beaten by definition order: [[nextgroup]].
 After [[\begin{quote}]] or [[\item]], the \TeX{} syntax expects an
@@ -314,6 +338,7 @@ syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1 contained containedin=tex
 @
 
 \subsection{The fallback chunk region}
+\label{sec:fallback}
 
 This region is the skeleton's safety net: it matches \emph{every}
 chunk, leaves the body unhighlighted, and is outranked by the
@@ -925,6 +950,36 @@ the re-tangled files.  [[make check]] enforces the two things worth
 enforcing: [[noroots]] must report exactly the three root chunks (an
 extra root is a typo'd chunk reference), and the tangled files must
 match the working tree.
+
+The license is MIT, tangled from here so that the title page can
+show the same text the repository ships.  Versions 1.0--1.2 carried no
+license statement of their own; the credit to their authors lives in
+the title page's footnote and in the syntax file's header.
+
+<<[[LICENSE]]>>=
+MIT License
+
+Copyright (c) 2008 Xun Gong, Dirk Baechle
+Copyright (c) 2026 Daniel Bosk
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+@
 
 Two conventions keep the tangle byte-exact:
 

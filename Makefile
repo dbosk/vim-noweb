@@ -5,6 +5,7 @@
 
 NWSRC=	vim-noweb.nw
 TANGLED=	syntax/noweb.vim autoload/noweb.vim ftdetect/noweb.vim
+TANGLED+=	LICENSE
 
 .PHONY: all
 all: ${TANGLED}
@@ -17,13 +18,18 @@ ${TANGLED}: ${NWSRC}
 vim-noweb.tex: ${NWSRC}
 	noweave -n -delay -t8 -autolang -index -filter tominted $< > $@
 
-vim-noweb.pdf: vim-noweb.tex
+# mkdir _minted: minted v3's latexminted writes its highlight cache
+# there but does not create the directory when kpsewhich finds another
+# _minted elsewhere on the TeX path; without it every chunk renders as
+# a literal <MINTED> placeholder.
+vim-noweb.pdf: vim-noweb.tex LICENSE
+	mkdir -p _minted
 	latexmk -pdf -shell-escape vim-noweb.tex
 
 .PHONY: check
 check: all
 	noroots ${NWSRC}
-	git diff --exit-code -- syntax autoload ftdetect
+	git diff --exit-code -- syntax autoload ftdetect LICENSE
 
 .PHONY: clean
 clean:
