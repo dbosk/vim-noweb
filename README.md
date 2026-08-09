@@ -26,10 +26,30 @@ Plug 'dbosk/vim-noweb'
 The language-aware highlighting refreshes on every write; `:NowebSyncLang`
 refreshes it on demand.
 
+## Completion and navigation
+
+Chunk names complete after `<<`: `<C-x><C-o>` in plain Vim, and
+automatically with YCM (the plugin registers the `<<` trigger for
+you; other completion frameworks pick the same function up through
+their omnifunc bridges).  Completion closes the `>>` unless it is
+already there, and the menu marks referenced-but-undefined chunks —
+handy for spotting typos.
+
+Chunk definitions resolve as tags: `<C-]>` on a reference jumps to
+the definition, `:tnext` steps through the appends (a chunk defined
+several times has several tag matches), `<C-t>` jumps back and `g]`
+lists them all.  `]c` / `[c` step through every occurrence
+(definitions and uses) of the chunk under the cursor, and
+`:NowebRefs` collects them in the location list.  Set
+`g:noweb_no_maps` to keep the bracket maps unmapped, or bind the
+`<Plug>(noweb-next-occurrence)` / `<Plug>(noweb-prev-occurrence)`
+maps to keys of your own.
+
 ## Hacking
 
 The source of truth is `vim-noweb.nw` — a literate program from which
-everything under `syntax/`, `autoload/` and `ftdetect/` tangles.  Do
+everything under `syntax/`, `autoload/`, `ftdetect/` and `ftplugin/`
+tangles.  Do
 not edit the `.vim` files directly; edit the `.nw`, run `make`, and
 commit the `.nw` together with the re-tangled `.vim` files.  `make
 check` must pass: it verifies the root chunks and that the tangled
