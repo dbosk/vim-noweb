@@ -67,6 +67,9 @@ The plugin's lineage, version by version:
 \item[v1.4] reliable highlighting: defences against the included
   language syntaxes and against runaway \TeX{} regions.  The
   rationale for those defences is the bulk of this document.
+\item[v1.5] language seeds come from the editor's own filetype
+  database on Neovim (\cref{sec:askeditor}); the fixed tables remain
+  as a fallback.
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -204,7 +207,7 @@ ignores it but archaeologists should not have to run [[git log]].
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.4
+" Version:		1.5
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -212,6 +215,9 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.5: Seed chunk languages from the editor's own filetype database
+"       (vim.filetype.match) on Neovim; the fixed tables remain as a
+"       fallback for other Vims.
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
 "       chunk headers (sh here-docs used to eat chunk bodies), implicit
@@ -461,14 +467,22 @@ augroup END
 \section{Language inference}
 \label{sec:autoload}
 
-This file is a Vimscript port of the core of noweb's \enquote{autolang}
-filter (from \texttt{tominted.nw}): seed every chunk with a language
-taken from a filename-like chunk name or a [[#!]] line, then propagate
-those languages along \emph{use} edges, so a descriptively-named chunk
-used by a typed root inherits the root's language.  Extension-only
-dispatch would miss most chunks in a real document---the whole point
-of noweb is that chunks are named for what they mean, not what file
-they land in.
+This file is a Vimscript port of the \emph{algorithm} at the core of
+noweb's \enquote{autolang} filter (from \texttt{tominted.nw}): seed
+every chunk with a language taken from a filename-like chunk name or a
+[[#!]] line, then propagate those languages along \emph{use} edges, so
+a descriptively-named chunk used by a typed root inherits the root's
+language.  Extension-only dispatch would miss most chunks in a real
+document---the whole point of noweb is that chunks are named for what
+they mean, not what file they land in.
+
+The seeding \emph{data}, however, is not ported: on Neovim the
+questions \enquote{what language is a file with this name?} and
+\enquote{what language does this shebang name?} are answered by the
+editor's own filetype database (\cref{sec:askeditor}), which is
+exactly the data we would otherwise re-encode by hand.  The small
+fixed tables that seeded versions 1.3--1.4 remain only as a fallback
+for editors without that database.
 
 The file reads data first, then helpers, then the algorithm---which
 happens to be pedagogical order as well:
@@ -483,6 +497,8 @@ happens to be pedagogical order as well:
 <<[[s:interpreters]] table>>
 
 <<the [[s:CONFLICT]] sentinel>>
+
+<<[[s:filetype_match]]>>
 
 <<[[s:lexer_for_chunk]]>>
 
@@ -500,21 +516,62 @@ happens to be pedagogical order as well:
 <<autoload file header>>=
 " autoload/noweb.vim -- per-chunk language inference for noweb sources
 "
-" Ports the core of the "autolang" filter from noweb's tominted.nw:
+" Ports the algorithm of the "autolang" filter from noweb's tominted.nw:
 " every code chunk is seeded with a language from a filename-like chunk
 " name or a #! line, and those languages then propagate along @<<use@>>
 " edges (a worklist with conflict detection), so a descriptively-named
-" chunk used by a typed root inherits the root's language.  The result
+" chunk used by a typed root inherits the root's language.  On Neovim
+" the seeds come from the editor's own filetype database
+" (vim.filetype.match); fixed tables remain as the fallback.  The result
 " drives one :syntax region per language, each including that language's
 " own syntax file on demand.
 @
 
+\subsection{Asking the editor first}
+\label{sec:askeditor}
+
+Everything this file wants to know about names and shebangs is data
+the editor already maintains: Neovim's filetype database maps
+filenames \emph{and} file contents to filetypes, and filetypes are
+precisely the names [[:syntax include]] wants.  Asking it instead of
+keeping our own tables removes the redundancy, keeps the answers in
+sync with the editor across upgrades, and widens coverage to every
+language Neovim can detect---[[x.zsh]] becomes [[zsh]], not the
+[[sh]] our table used to approximate it with.
+
+Edit-time inference may now disagree with weave-time autolang in
+corner cases (autolang asks Pygments, which calls the same chunk
+[[bash]]); that is by design, not drift: each side answers how
+\emph{its} medium highlights the chunk.
+
+The results are cached because chunk names recur on every refresh and
+the database does not change within a session.  On anything that is
+not Neovim the function answers [['']], which routes every caller to
+its fallback table.
+
+<<[[s:filetype_match]]>>=
+" Ask Neovim's filetype database (vim.filetype.match) for ARGS, e.g.
+" {'filename': ...} or {'filename': ..., 'contents': [...]}.  Returns
+" '' when there is no answer or no database (not Neovim).
+let s:ft_cache = {}
+function! s:filetype_match(args) abort
+  if !has('nvim')
+    return ''
+  endif
+  let l:key = string(a:args)
+  if !has_key(s:ft_cache, l:key)
+    let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+  endif
+  return s:ft_cache[l:key]
+endfunction
+@
+
 \subsection{Naming a chunk's language}
 
-Two tables drive the name-based seeding: exact basenames (the
-Makefile family has no extension) and extensions.  The values are Vim
-syntax names, which double as the canonical language keys everywhere
-else in this file.
+The fallback tables carry the name-based seeding when the editor's
+database is unavailable: exact basenames (the Makefile family has no
+extension) and extensions.  The values are Vim syntax names, which
+double as the canonical language keys everywhere else in this file.
 
 <<[[s:lexers_by_name]] table>>=
 " Chunk name (verbatim basename) -> Vim syntax name.
@@ -547,8 +604,11 @@ let s:lexers_by_ext = {
 The lookup mirrors autolang's [[lexer_for_chunk]]: a chunk name may
 use noweb's [[[[...]]]] quoting and may contain directory separators,
 and only the basename decides---[[@<<src/util.py@>>]] is Python no
-matter where it tangles to.  Note the quote-stripping must come first;
-[[[[Makefile]]]] should hit the basename table.
+matter where it tangles to.  Note the quote-stripping must come
+first; [[[[Makefile]]]] should be looked up as a basename.  The
+basename, not the full name, also goes to the editor's database: its
+path-based patterns (matching e.g.\ files under [[etc/]]) make no
+sense for chunk names.
 
 <<[[s:lexer_for_chunk]]>>=
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
@@ -560,27 +620,42 @@ function! s:lexer_for_chunk(name) abort
     let l:name = l:name[2:-3]
   endif
   let l:base = matchstr(l:name, '[^/]*$')
-  if has_key(s:lexers_by_name, l:base)
-    return s:lexers_by_name[l:base]
+  let l:ft = s:filetype_match({'filename': l:base})
+  if l:ft !=# ''
+    return l:ft
   endif
-  let l:dot = strridx(l:base, '.')
-  if l:dot >= 0
-    let l:ext = strpart(l:base, l:dot)
-    if has_key(s:lexers_by_ext, l:ext)
-      return s:lexers_by_ext[l:ext]
-    endif
-  endif
-  return ''
+  <<look [[l:base]] up in the fallback tables>>
 endfunction
+@
+
+<<look [[l:base]] up in the fallback tables>>=
+if has_key(s:lexers_by_name, l:base)
+  return s:lexers_by_name[l:base]
+endif
+let l:dot = strridx(l:base, '.')
+if l:dot >= 0
+  let l:ext = strpart(l:base, l:dot)
+  if has_key(s:lexers_by_ext, l:ext)
+    return s:lexers_by_ext[l:ext]
+  endif
+endif
+return ''
 @
 
 \subsection{Shebangs}
 
 A chunk whose name says nothing may still open with [[#!/bin/sh]].
-The interpreter table maps interpreter basenames to syntax names, and
-the [[env]] indirection is followed because [[#!/usr/bin/env python3]]
-is the portable spelling---the interesting token is the argument, not
-[[env]] itself.
+On Neovim the shebang goes to the editor's database as file
+\emph{contents}, together with a neutral, extensionless dummy
+filename---contents alone make Neovim skip parts of its detection
+(a bare [[#!/bin/bash]] goes unrecognised), while an unknown filename
+routes the query through the full machinery, shebang analysis
+included.
+
+The fallback interpreter table maps interpreter basenames to syntax
+names, and its parser follows the [[env]] indirection because
+[[#!/usr/bin/env python3]] is the portable spelling---the interesting
+token is the argument, not [[env]] itself.
 
 <<[[s:interpreters]] table>>=
 " Interpreter basename from a #! line -> Vim syntax name.
@@ -594,21 +669,30 @@ let s:interpreters = {
 @
 
 <<[[s:shebang_lang]]>>=
-" Return the language a #! line names, following the env indirection.
+" Return the language a #! line names, or '' if it is not a #! line.
 function! s:shebang_lang(line) abort
   if a:line !~# '^#!'
     return ''
   endif
-  let l:toks = split(a:line[2:])
-  if empty(l:toks)
-    return ''
+  let l:ft = s:filetype_match({'filename': 'noweb-chunk', 'contents': [a:line]})
+  if l:ft !=# ''
+    return l:ft
   endif
-  let l:interp = matchstr(l:toks[0], '[^/]*$')
-  if l:interp ==# 'env' && len(l:toks) > 1
-    let l:interp = matchstr(l:toks[1], '[^/]*$')
-  endif
-  return get(s:interpreters, l:interp, '')
+  <<parse the shebang with the fallback table>>
 endfunction
+@
+
+<<parse the shebang with the fallback table>>=
+" Follow the env indirection: the interesting token is env's argument.
+let l:toks = split(a:line[2:])
+if empty(l:toks)
+  return ''
+endif
+let l:interp = matchstr(l:toks[0], '[^/]*$')
+if l:interp ==# 'env' && len(l:toks) > 1
+  let l:interp = matchstr(l:toks[1], '[^/]*$')
+endif
+return get(s:interpreters, l:interp, '')
 @
 
 \subsection{Escaping chunk names into patterns}

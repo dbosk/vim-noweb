@@ -1,10 +1,12 @@
 " autoload/noweb.vim -- per-chunk language inference for noweb sources
 "
-" Ports the core of the "autolang" filter from noweb's tominted.nw:
+" Ports the algorithm of the "autolang" filter from noweb's tominted.nw:
 " every code chunk is seeded with a language from a filename-like chunk
 " name or a #! line, and those languages then propagate along <<use>>
 " edges (a worklist with conflict detection), so a descriptively-named
-" chunk used by a typed root inherits the root's language.  The result
+" chunk used by a typed root inherits the root's language.  On Neovim
+" the seeds come from the editor's own filetype database
+" (vim.filetype.match); fixed tables remain as the fallback.  The result
 " drives one :syntax region per language, each including that language's
 " own syntax file on demand.
 
@@ -43,6 +45,21 @@ let s:interpreters = {
 
 let s:CONFLICT = "\x00conflict\x00"
 
+" Ask Neovim's filetype database (vim.filetype.match) for ARGS, e.g.
+" {'filename': ...} or {'filename': ..., 'contents': [...]}.  Returns
+" '' when there is no answer or no database (not Neovim).
+let s:ft_cache = {}
+function! s:filetype_match(args) abort
+  if !has('nvim')
+    return ''
+  endif
+  let l:key = string(a:args)
+  if !has_key(s:ft_cache, l:key)
+    let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+  endif
+  return s:ft_cache[l:key]
+endfunction
+
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
 " The name may use noweb's [[...]] quoting and may contain directory
 " separators; only the basename decides (mirrors lexer_for_chunk).
@@ -52,6 +69,10 @@ function! s:lexer_for_chunk(name) abort
     let l:name = l:name[2:-3]
   endif
   let l:base = matchstr(l:name, '[^/]*$')
+  let l:ft = s:filetype_match({'filename': l:base})
+  if l:ft !=# ''
+    return l:ft
+  endif
   if has_key(s:lexers_by_name, l:base)
     return s:lexers_by_name[l:base]
   endif
@@ -65,11 +86,16 @@ function! s:lexer_for_chunk(name) abort
   return ''
 endfunction
 
-" Return the language a #! line names, following the env indirection.
+" Return the language a #! line names, or '' if it is not a #! line.
 function! s:shebang_lang(line) abort
   if a:line !~# '^#!'
     return ''
   endif
+  let l:ft = s:filetype_match({'filename': 'noweb-chunk', 'contents': [a:line]})
+  if l:ft !=# ''
+    return l:ft
+  endif
+  " Follow the env indirection: the interesting token is env's argument.
   let l:toks = split(a:line[2:])
   if empty(l:toks)
     return ''

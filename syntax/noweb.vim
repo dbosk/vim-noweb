@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.4
+" Version:		1.5
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,9 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.5: Seed chunk languages from the editor's own filetype database
+"       (vim.filetype.match) on Neovim; the fixed tables remain as a
+"       fallback for other Vims.
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
 "       chunk headers (sh here-docs used to eat chunk bodies), implicit

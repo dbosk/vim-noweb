@@ -6,7 +6,10 @@ noweb markup (chunk headers, chunk references, `[[...]]` quotes) is
 marked, and each code chunk's body is highlighted in the chunk's own
 language, inferred the same way noweb's `autolang` filter does it
 (filename-like chunk names, `#!` lines, and propagation along
-`<<use>>` edges).
+`<<use>>` edges).  On Neovim the name and shebang lookups use the
+editor's own filetype database (`vim.filetype.match()`), covering
+every language Neovim can detect; on other Vims a small fixed table
+serves as fallback.
 
 Originally a mirror of <http://www.vim.org/scripts/script.php?script_id=2129>.
 
