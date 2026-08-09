@@ -397,3 +397,67 @@ function! noweb#complete(findstart, base) abort
   endfor
   return l:items
 endfunction
+
+" Tagfunc resolving chunk names: every definition of the chunk is one
+" tag match, in file order, so CTRL-] jumps to the first definition
+" and :tnext steps through the appends.  Invoked by a normal-mode
+" command ('c' in a:flags), the name comes from the cursor rather
+" than a:pattern, which cannot hold the blanks chunk names may have.
+function! noweb#tagfunc(pattern, flags, info) abort
+  let l:name = stridx(a:flags, 'c') >= 0 ? s:chunk_at_cursor() : a:pattern
+  let l:occ = s:chunk_occurrences()
+  if l:name ==# ''
+    return v:null
+  endif
+  if !has_key(l:occ, l:name)
+    return stridx(a:flags, 'c') >= 0 ? [] : v:null
+  endif
+  let l:tags = []
+  for l:def in l:occ[l:name].defs
+    " The cmd is the definition's line number: appends share identical
+    " header lines, so a search pattern could not tell them apart.
+    call add(l:tags, {'name': l:name, 'filename': expand('%:p'),
+          \ 'cmd': string(l:def[0]), 'kind': 'd'})
+  endfor
+  return l:tags
+endfunction
+
+" The ]c / [c motion: the next (dir > 0) or previous occurrence --
+" definition or use -- of the chunk under the cursor, wrapping.
+function! noweb#next_occurrence(dir) abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  normal! m'
+  call search('@\@1<!<<' . s:re_escape(l:name) . '>>',
+        \ a:dir > 0 ? 'w' : 'bw')
+endfunction
+
+" Fill the location list with every definition and use of the chunk
+" under the cursor, in file order, and open it.
+function! noweb#refs() abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  let l:occ = get(s:chunk_occurrences(), l:name, {'defs': [], 'uses': []})
+  let l:places = sort(l:occ.defs + l:occ.uses,
+        \ {a, b -> a[0] == b[0] ? a[1] - b[1] : a[0] - b[0]})
+  let l:items = []
+  for l:place in l:places
+    call add(l:items, {'bufnr': bufnr('%'), 'lnum': l:place[0],
+          \ 'col': l:place[1], 'text': getline(l:place[0])})
+  endfor
+  call setloclist(0, [], ' ', {'title': '<<' . l:name . '>>',
+        \ 'items': l:items})
+  lopen
+endfunction
+
+function! s:no_chunk() abort
+  echohl WarningMsg
+  echomsg 'noweb: no chunk name under the cursor'
+  echohl None
+endfunction

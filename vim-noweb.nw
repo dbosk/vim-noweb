@@ -528,6 +528,12 @@ happens to be pedagogical order as well:
 <<[[s:chunk_at_cursor]]>>
 
 <<[[noweb#complete]]>>
+
+<<[[noweb#tagfunc]]>>
+
+<<[[noweb#next_occurrence]]>>
+
+<<[[noweb#refs]]>>
 @
 
 <<autoload file header>>=
@@ -1150,15 +1156,24 @@ let b:did_ftplugin = 1
 <<hook completion and navigation into the buffer>>
 
 <<register the chunk-reference trigger with YCM>>
+
+<<the occurrence maps and the [[:NowebRefs]] command>>
 @
 
 [[b:undo_ftplugin]] is the ftplugin counterpart of the syntax file's
 idempotence concerns (\cref{sec:building}): when the filetype changes
-away from [[noweb]], Vim runs it to undo everything we set.
+away from [[noweb]], Vim runs it to undo everything we set.  The
+[['tagfunc']] option is younger than the rest of what the plugin
+relies on (Vim 8.2), hence the feature test---on an older Vim the
+plugin degrades to completion only.
 
 <<hook completion and navigation into the buffer>>=
 setlocal omnifunc=noweb#complete
 let b:undo_ftplugin = 'setlocal omnifunc<'
+if exists('+tagfunc')
+  setlocal tagfunc=noweb#tagfunc
+  let b:undo_ftplugin .= ' tagfunc<'
+endif
 @
 
 YCM completes through the omnifunc above, but fires it only when the
@@ -1177,6 +1192,37 @@ let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
 if !has_key(g:ycm_semantic_triggers, 'noweb')
   let g:ycm_semantic_triggers.noweb = ['@<<']
 endif
+@
+
+The remaining navigation surface is small: a motion pair stepping
+through a chunk's occurrences (\texttt{]c} and \texttt{[c}, mirroring
+Vim's bracket-motion family) and a command collecting them in the
+location list.  The maps go through [[<Plug>]] indirection and yield
+to the user twice over: a [[g:noweb_no_maps]] switch suppresses them
+wholesale, and [[hasmapto]] skips any the user has already bound to
+their own keys.  (\texttt{]c}/\texttt{[c} also mean
+\enquote{next/previous change} in diff mode; diffed noweb sources are
+rare, but remapping the [[<Plug>]]s moves ours out of the way.)
+
+<<the occurrence maps and the [[:NowebRefs]] command>>=
+command! -buffer NowebRefs call noweb#refs()
+
+nnoremap <silent> <Plug>(noweb-next-occurrence)
+      \ :<C-u>call noweb#next_occurrence(1)<CR>
+nnoremap <silent> <Plug>(noweb-prev-occurrence)
+      \ :<C-u>call noweb#next_occurrence(-1)<CR>
+if !get(g:, 'noweb_no_maps', 0)
+  if !hasmapto('<Plug>(noweb-next-occurrence)', 'n')
+    nmap <buffer> ]c <Plug>(noweb-next-occurrence)
+  endif
+  if !hasmapto('<Plug>(noweb-prev-occurrence)', 'n')
+    nmap <buffer> [c <Plug>(noweb-prev-occurrence)
+  endif
+endif
+
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
+      \ . ' | silent! nunmap <buffer> [c'
+      \ . ' | silent! delcommand -buffer NowebRefs'
 @
 
 \subsection{Scanning for occurrences}
@@ -1349,6 +1395,119 @@ function! noweb#complete(findstart, base) abort
     <<find the start of the chunk name being completed>>
   endif
   <<collect the matching chunk names>>
+endfunction
+@
+
+\subsection{Definitions are tags}
+\label{sec:tagfunc}
+
+Chunk definitions map onto Vim's tag model with almost suspicious
+precision.  A chunk may be defined many times---each append is
+another definition---and a tag may have many matches: so
+\texttt{CTRL-]} on a reference jumps to the first definition,
+[[:tnext]] steps through the appends, \texttt{CTRL-T} pops back up
+the tag stack, and \texttt{g]} or [[:tselect]] lists all of them.  All of
+that behaviour comes from the [['tagfunc']] option; none of it needs
+a mapping.
+
+Two details deserve their comment.  When the tagfunc is invoked by a
+normal-mode command, [[a:flags]] contains [[c]] and the function may
+consult the cursor---which we must, because the [[a:pattern]] Vim
+passes is derived from the word under the cursor and chunk names may
+contain blanks.  And each match locates its definition by \emph{line
+number} rather than the conventional search pattern: every append of
+a chunk shares the byte-identical header line, so a pattern could
+only ever find the first one.
+
+Returning [[v:null]] (rather than an empty list) when the cursor is
+not on a chunk hands the lookup back to Vim's regular tags machinery,
+so \texttt{CTRL-]} elsewhere in the buffer still searches any tags
+file the user has.  An empty list would instead declare
+\enquote{no such tag} ourselves---which is exactly right for a chunk
+that is referenced but never defined.
+
+<<[[noweb#tagfunc]]>>=
+" Tagfunc resolving chunk names: every definition of the chunk is one
+" tag match, in file order, so CTRL-] jumps to the first definition
+" and :tnext steps through the appends.  Invoked by a normal-mode
+" command ('c' in a:flags), the name comes from the cursor rather
+" than a:pattern, which cannot hold the blanks chunk names may have.
+function! noweb#tagfunc(pattern, flags, info) abort
+  let l:name = stridx(a:flags, 'c') >= 0 ? s:chunk_at_cursor() : a:pattern
+  let l:occ = s:chunk_occurrences()
+  if l:name ==# ''
+    return v:null
+  endif
+  if !has_key(l:occ, l:name)
+    return stridx(a:flags, 'c') >= 0 ? [] : v:null
+  endif
+  let l:tags = []
+  for l:def in l:occ[l:name].defs
+    " The cmd is the definition's line number: appends share identical
+    " header lines, so a search pattern could not tell them apart.
+    call add(l:tags, {'name': l:name, 'filename': expand('%:p'),
+          \ 'cmd': string(l:def[0]), 'kind': 'd'})
+  endfor
+  return l:tags
+endfunction
+@
+
+\subsection{Stepping through uses and appends}
+\label{sec:refs}
+
+The motion jumps to the next or previous occurrence of the chunk
+under the cursor---definition or use, the pattern matches both.
+[[m']] first: the jump is a real jump, so \texttt{CTRL-O} and
+[[``]] return to where it started.  The search wraps, making
+\texttt{]c} from the last occurrence a quick way home to the first.
+
+<<[[noweb#next_occurrence]]>>=
+" The ]c / [c motion: the next (dir > 0) or previous occurrence --
+" definition or use -- of the chunk under the cursor, wrapping.
+function! noweb#next_occurrence(dir) abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  normal! m'
+  call search('@\@1<!@<<' . s:re_escape(l:name) . '@>>',
+        \ a:dir > 0 ? 'w' : 'bw')
+endfunction
+@
+
+[[:NowebRefs]] shows the whole picture at once: the location list
+gets one entry per occurrence, definitions and uses in file order,
+and the list window opens for browsing.  The location list rather
+than the quickfix list because the survey is a per-window affair; a
+second window surveying another chunk should not clobber it.
+
+<<[[noweb#refs]]>>=
+" Fill the location list with every definition and use of the chunk
+" under the cursor, in file order, and open it.
+function! noweb#refs() abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  let l:occ = get(s:chunk_occurrences(), l:name, {'defs': [], 'uses': []})
+  let l:places = sort(l:occ.defs + l:occ.uses,
+        \ {a, b -> a[0] == b[0] ? a[1] - b[1] : a[0] - b[0]})
+  let l:items = []
+  for l:place in l:places
+    call add(l:items, {'bufnr': bufnr('%'), 'lnum': l:place[0],
+          \ 'col': l:place[1], 'text': getline(l:place[0])})
+  endfor
+  call setloclist(0, [], ' ', {'title': '@<<' . l:name . '@>>',
+        \ 'items': l:items})
+  lopen
+endfunction
+
+function! s:no_chunk() abort
+  echohl WarningMsg
+  echomsg 'noweb: no chunk name under the cursor'
+  echohl None
 endfunction
 @
 
