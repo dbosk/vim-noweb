@@ -309,12 +309,12 @@ function! noweb#refresh() abort
   syntax sync fromstart
 endfunction
 
-" A chunk definition alone on its line, and a chunk reference; both
-" capture the name via \zs / \ze.  The @-escape exclusion is NOT in
-" the reference pattern -- look-behinds are slow -- but tested by
-" s:refs_on_line beside each match.  s:HOT matches every line the
-" occurrence scan cannot skip.
-let s:DEF = '^<<\zs.\{-}\ze>>=\s*$'
+" A chunk definition (nonempty name) alone on its line, and a chunk
+" reference; both capture the name via \zs / \ze.  The @-escape
+" exclusion is NOT in the reference pattern -- look-behinds are slow
+" -- but tested by s:refs_on_line beside each match.  s:HOT matches
+" every line the occurrence scan cannot skip.
+let s:DEF = '^<<\zs.\{-1,}\ze>>=\s*$'
 let s:REF = '<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze>>'
 let s:HOT = '<<\|^@\%( \|$\)'
 
@@ -340,31 +340,44 @@ endfunction
 " where every entry is a [lnum, col] pair (1-based, at the first <).
 " A chunk defined n times has n defs -- appends are definitions too.
 " Memoized on b:changedtick: the scan only re-runs after an edit.
-" match() hops between s:HOT lines in C; the loop body only ever runs
-" on lines that can matter.
+" On Neovim the scan runs in Lua (lua/noweb/scan.lua); the Vim script
+" loop is the fallback.  Both must produce identical results.
 function! s:chunk_occurrences() abort
   if get(b:, 'noweb_occ_tick', -1) == b:changedtick
     return b:noweb_occ
   endif
-  let l:occ = {}
-  let l:lines = getline(1, '$')
-  let l:in_code = 0
-  let l:i = match(l:lines, s:HOT)
-  while l:i >= 0
-    let l:line = l:lines[l:i]
-    let l:lnum = l:i + 1
-    if l:line =~# s:DEF
-      let l:in_code = 1
-      call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
-    elseif l:line =~# '^@\%( \|$\)'
-      let l:in_code = 0
-    elseif l:in_code
-      for l:ref in s:refs_on_line(l:line)
-        call add(s:entry(l:occ, l:ref[0]).uses, [l:lnum, l:ref[1] - 1])
-      endfor
-    endif
-    let l:i = match(l:lines, s:HOT, l:i + 1)
-  endwhile
+  if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
+    let l:occ = luaeval('require("noweb.scan")()')
+    " luaeval turns an empty Lua table into a dict; lists are expected.
+    for l:e in values(l:occ)
+      if type(l:e.defs) == v:t_dict
+        let l:e.defs = []
+      endif
+      if type(l:e.uses) == v:t_dict
+        let l:e.uses = []
+      endif
+    endfor
+  else
+    let l:occ = {}
+    let l:lines = getline(1, '$')
+    let l:in_code = 0
+    let l:i = match(l:lines, s:HOT)
+    while l:i >= 0
+      let l:line = l:lines[l:i]
+      let l:lnum = l:i + 1
+      if l:line =~# s:DEF
+        let l:in_code = 1
+        call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
+      elseif l:line =~# '^@\%( \|$\)'
+        let l:in_code = 0
+      elseif l:in_code
+        for l:ref in s:refs_on_line(l:line)
+	  call add(s:entry(l:occ, l:ref[0]).uses, [l:lnum, l:ref[1] - 1])
+	endfor
+      endif
+      let l:i = match(l:lines, s:HOT, l:i + 1)
+    endwhile
+  endif
   let b:noweb_occ = l:occ
   let b:noweb_occ_tick = b:changedtick
   return l:occ

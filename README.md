@@ -51,8 +51,8 @@ maps to keys of your own.
 ## Hacking
 
 The source of truth is `vim-noweb.nw` — a literate program from which
-everything under `syntax/`, `autoload/`, `ftdetect/`, `ftplugin/`
-and `plugin/` tangles.  Do
+everything under `syntax/`, `autoload/`, `ftdetect/`, `ftplugin/`,
+`plugin/` and `lua/` tangles.  Do
 not edit the `.vim` files directly; edit the `.nw`, run `make`, and
 commit the `.nw` together with the re-tangled `.vim` files.  `make
 check` must pass: it verifies the root chunks and that the tangled

@@ -83,15 +83,16 @@ no code from v1.2 or earlier remains, only the file layout and the
 group names.
 
 Everything in this repository tangles from this file.  The plugin's
-five files are the root chunks, named after their paths in the
+six files are the root chunks, named after their paths in the
 plugin tree:
 
 \begin{itemize}
 \item [[syntax/noweb.vim]],
 \item [[autoload/noweb.vim]],
 \item [[ftdetect/noweb.vim]],
-\item [[ftplugin/noweb.vim]], and
-\item [[plugin/noweb.vim]];
+\item [[ftplugin/noweb.vim]],
+\item [[plugin/noweb.vim]], and
+\item [[lua/noweb/scan.lua]];
 \end{itemize}
 
 the [[LICENSE]] tangles from here as well
@@ -113,7 +114,7 @@ here.
 \section{Overview}
 \label{sec:overview}
 
-The plugin is five small files with a one-way control flow:
+The plugin is six small files with a one-way control flow:
 
 \begin{description}
 \item[\texttt{plugin/noweb.vim}] runs once at startup and registers
@@ -136,6 +137,9 @@ The plugin is five small files with a one-way control flow:
   the fallback.  It re-runs on every write, so the highlighting
   follows the file as it evolves.  It also provides the completion
   and navigation functions the ftplugin points at.
+\item[\texttt{lua/noweb/scan.lua}] is the occurrence scan those
+  functions share, in Lua for speed; on Vim a Vim-script fallback in
+  the autoload file takes its place (\cref{sec:luascan}).
 \end{description}
 
 Two invariants make the layering work, and almost every design
@@ -234,8 +238,10 @@ ignores it but archaeologists should not have to run [[git log]].
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
-"       context (undefined names first when defining) and memoize
-"       the occurrence scan on b:changedtick.
+"       context (undefined names first when defining), memoize the
+"       occurrence scan on b:changedtick and run it in Lua on Neovim
+"       (lua/noweb/scan.lua; 2 ms where Vim script needs 100 on a
+"       15k-line source).
 " v1.6: Editing support: chunk names complete through the buffer's
 "       omnifunc (picked up by YCM and friends), definitions resolve
 "       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c
@@ -1311,12 +1317,12 @@ those lines (definition headers contain [[@<<]], so the first
 alternative covers them too).
 
 <<the [[s:DEF]] and [[s:REF]] patterns>>=
-" A chunk definition alone on its line, and a chunk reference; both
-" capture the name via \zs / \ze.  The @-escape exclusion is NOT in
-" the reference pattern -- look-behinds are slow -- but tested by
-" s:refs_on_line beside each match.  s:HOT matches every line the
-" occurrence scan cannot skip.
-let s:DEF = '^@<<\zs.\{-}\ze@>>=\s*$'
+" A chunk definition (nonempty name) alone on its line, and a chunk
+" reference; both capture the name via \zs / \ze.  The @-escape
+" exclusion is NOT in the reference pattern -- look-behinds are slow
+" -- but tested by s:refs_on_line beside each match.  s:HOT matches
+" every line the occurrence scan cannot skip.
+let s:DEF = '^@<<\zs.\{-1,}\ze@>>=\s*$'
 let s:REF = '@<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze@>>'
 let s:HOT = '@<<\|^@\%( \|$\)'
 @
@@ -1326,58 +1332,71 @@ enters code mode, a text-chunk marker leaves it, and references are
 collected only \emph{inside} code---in prose, [[@<<...@>>]] is just
 text to noweb, so it must be just text to us.  Each occurrence is a
 (line, column) pair pointing at the first bracket, ready for a jump.
-Unlike the language scan, this one does not step through the buffer
-line by line: profiling showed the cost of scanning a document this
-size is dominated not by any pattern but by the per-statement
-overhead of the loop body itself, run 1\,700 times.  So the loop
-asks [[match()]] for the next line matching [[s:HOT]]---that search
-runs in C---and interprets Vim script only on the dozen-per-hundred
-lines that can matter; skipped lines cannot change the state
-machine's state, by construction of [[s:HOT]].  The whole rescan of
-this very document takes about 13\,ms (down from 43 for the naive
-loop).
+When does the scan's cost strike?  Only when somebody asks---a
+completion, a tag lookup, an occurrence jump---never on editor
+events; and the scan always reads the live buffer, so unsaved chunks
+are visible the moment they are typed.  A memo on [[b:changedtick]]
+(which Vim bumps on every buffer modification) keeps repeated
+queries from rescanning an unchanged buffer, so the price is one
+rescan per edit-then-query, paid under a completion trigger.  (YCM
+additionally caches the returned candidates for the duration of a
+completion popup, so it asks once per triggered popup, not once per
+keystroke.)  The rescan is deliberately \emph{not} incremental:
+recomputing from scratch cannot go stale, where tracking edited
+regions can.
 
-When does that cost strike?  Only when somebody asks---a completion,
-a tag lookup, an occurrence jump---never on editor events; and the
-scan always reads the live buffer, so unsaved chunks are visible the
-moment they are typed.  A memo on [[b:changedtick]] (which Vim bumps
-on every buffer modification) keeps repeated queries from rescanning
-an unchanged buffer, so the price is one rescan per
-edit-then-query, paid under a completion trigger where a dozen
-milliseconds is imperceptible.  (YCM additionally caches the
-returned candidates for the duration of a completion popup, so it
-asks once per triggered popup, not once per keystroke.)  The rescan
-is deliberately \emph{not} incremental: recomputing from scratch
-cannot go stale, where tracking edited regions can.
+That leaves making the full pass fast, which is a tale of three
+implementations, benchmarked on the largest noweb source on the
+author's disk (nytid's \texttt{todo.nw}, 15\,000 lines) and on this
+document (1\,700 lines).  A naive Vim-script loop over every line
+costs 43\,ms on this document---not any pattern's fault, but the
+per-statement overhead of an interpreted loop body run 1\,700 times.
+Hopping between candidate lines with [[match()]], which searches a
+list in C, cuts that to 13\,ms---but on the 15\,000-line file still
+costs about 100\,ms, now dominated by [[match()]] recompiling its
+pattern on every call.  Legacy Vim script has nothing faster to
+offer, so the scan does what the language seeding already does
+(\cref{sec:askeditor}): it asks the editor.  On Neovim the scan runs
+in Lua (\cref{sec:luascan})---2\,ms for the 15\,000-line file, about
+4 end-to-end with the result's conversion back to Vim script,
+imperceptible---and the [[match()]] loop remains as the fallback for
+Vim, where the worst noweb sources in practice cost tens of
+milliseconds, once per edit-then-query.
+
+The dispatcher in [[s:chunk_occurrences]] chooses between the two
+and normalizes the Lua result: [[luaeval]] converts an empty Lua table
+to an empty \emph{dictionary}, so a chunk with uses but no
+definitions (or vice versa) would come back with the wrong type
+where a list is expected.  Setting [[g:noweb_scan_vimscript]] forces
+the fallback on Neovim; the test suite uses it to hold the two
+implementations to identical output, and it doubles as an escape
+hatch.
 
 <<[[s:chunk_occurrences]]>>=
 " Scan the buffer and return {chunk name -> {'defs': [...], 'uses': [...]}}
 " where every entry is a [lnum, col] pair (1-based, at the first <).
 " A chunk defined n times has n defs -- appends are definitions too.
 " Memoized on b:changedtick: the scan only re-runs after an edit.
-" match() hops between s:HOT lines in C; the loop body only ever runs
-" on lines that can matter.
+" On Neovim the scan runs in Lua (lua/noweb/scan.lua); the Vim script
+" loop is the fallback.  Both must produce identical results.
 function! s:chunk_occurrences() abort
   if get(b:, 'noweb_occ_tick', -1) == b:changedtick
     return b:noweb_occ
   endif
-  let l:occ = {}
-  let l:lines = getline(1, '$')
-  let l:in_code = 0
-  let l:i = match(l:lines, s:HOT)
-  while l:i >= 0
-    let l:line = l:lines[l:i]
-    let l:lnum = l:i + 1
-    if l:line =~# s:DEF
-      let l:in_code = 1
-      call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
-    elseif l:line =~# '^@\%( \|$\)'
-      let l:in_code = 0
-    elseif l:in_code
-      <<record every reference on the line>>
-    endif
-    let l:i = match(l:lines, s:HOT, l:i + 1)
-  endwhile
+  if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
+    let l:occ = luaeval('require("noweb.scan")()')
+    " luaeval turns an empty Lua table into a dict; lists are expected.
+    for l:e in values(l:occ)
+      if type(l:e.defs) == v:t_dict
+        let l:e.defs = []
+      endif
+      if type(l:e.uses) == v:t_dict
+        let l:e.uses = []
+      endif
+    endfor
+  else
+    <<scan the buffer in Vim script>>
+  endif
   let b:noweb_occ = l:occ
   let b:noweb_occ_tick = b:changedtick
   return l:occ
@@ -1389,6 +1408,35 @@ function! s:entry(occ, name) abort
   endif
   return a:occ[a:name]
 endfunction
+@
+
+\subsubsection{The scan in Vim script}
+\label{sec:vimscan}
+
+The fallback does not step through the buffer line by line: it asks
+[[match()]] for the next line matching [[s:HOT]]---that search runs
+in C---and interprets Vim script only on the lines that can matter.
+Skipped lines cannot change the state machine's state, by
+construction of [[s:HOT]].
+
+<<scan the buffer in Vim script>>=
+let l:occ = {}
+let l:lines = getline(1, '$')
+let l:in_code = 0
+let l:i = match(l:lines, s:HOT)
+while l:i >= 0
+  let l:line = l:lines[l:i]
+  let l:lnum = l:i + 1
+  if l:line =~# s:DEF
+    let l:in_code = 1
+    call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
+  elseif l:line =~# '^@\%( \|$\)'
+    let l:in_code = 0
+  elseif l:in_code
+    <<record every reference on the line>>
+  endif
+  let l:i = match(l:lines, s:HOT, l:i + 1)
+endwhile
 @
 
 A code line reaching the reference branch is known to contain a
@@ -1452,6 +1500,79 @@ function! s:chunk_at_cursor() abort
   endfor
   return ''
 endfunction
+@
+
+\subsubsection{The scan in Lua}
+\label{sec:luascan}
+
+The Neovim fast path is the plugin's sixth tangled file and its only
+non--Vim-script one: Neovim adds every [[lua/]] directory on the
+runtime path to Lua's module search, so the dispatcher reaches it as
+[[require("noweb.scan")]].  The module returns the scan function
+itself, and [[require]] caches the module, so the file is read once
+per session.
+
+The implementation mirrors \cref{sec:vimscan,sec:refsonline}
+construct for construct---same state machine, same escape and
+name-shape tests, same (line, column) output---and the test suite
+compares the two implementations' output on the same buffer, so they
+cannot drift apart silently.  Two dialect notes.  Lua patterns have
+no alternation, so the skip test is a byte comparison ([[64]] is
+[[@]]) plus a plain-text [[find]].  And Lua's lazy capture
+[[(.-)]] plays the role of Vim's [[\{-}]]; the name-shape
+conditions that Vim's pattern encodes as [[\%([^ ]\|...\)]] are
+plain string tests here.
+
+<<[[lua/noweb/scan.lua]]>>=
+-- lua/noweb/scan.lua -- the occurrence scan, Neovim fast path.
+--
+-- Mirrors the Vim script scan in autoload/noweb.vim construct for
+-- construct; the two must produce identical results (the test suite
+-- compares them).  Returns {name = {defs = {{lnum, col}, ...},
+--                                   uses = {{lnum, col}, ...}}}.
+
+return function()
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local occ = {}
+  local function entry(name)
+    local e = occ[name]
+    if not e then
+      e = { defs = {}, uses = {} }
+      occ[name] = e
+    end
+    return e
+  end
+  local in_code = false
+  for i, line in ipairs(lines) do
+    -- the s:HOT skip test: only @-lines and bracket lines can matter
+    if line:byte(1) == 64 or line:find('@<<', 1, true) then
+      local name = line:match('^@<<(.-)@>>=%s*$')
+      if name and name ~= '' then
+        in_code = true
+        table.insert(entry(name).defs, { i, 1 })
+      elseif line == '@' or line:sub(1, 2) == '@ ' then
+        in_code = false
+      elseif in_code then
+        <<collect the references on the line, in Lua>>
+      end
+    end
+  end
+  return occ
+end
+@
+
+<<collect the references on the line, in Lua>>=
+local init = 1
+while true do
+  local s, e, ref = line:find('@<<(.-)@>>', init)
+  if not s then break end
+  if ref ~= '' and ref:sub(1, 1) ~= ' ' and ref:sub(-1) ~= ' '
+      and ref:sub(-1) ~= '@'
+      and (s == 1 or line:sub(s - 1, s - 1) ~= '@') then
+    table.insert(entry(ref).uses, { i, s })
+  end
+  init = e + 1
+end
 @
 
 \subsection{Completing chunk names}

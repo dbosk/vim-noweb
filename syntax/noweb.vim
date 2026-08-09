@@ -14,8 +14,10 @@
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
-"       context (undefined names first when defining) and memoize
-"       the occurrence scan on b:changedtick.
+"       context (undefined names first when defining), memoize the
+"       occurrence scan on b:changedtick and run it in Lua on Neovim
+"       (lua/noweb/scan.lua; 2 ms where Vim script needs 100 on a
+"       15k-line source).
 " v1.6: Editing support: chunk names complete through the buffer's
 "       omnifunc (picked up by YCM and friends), definitions resolve
 "       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c
