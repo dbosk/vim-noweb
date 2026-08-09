@@ -70,6 +70,9 @@ The plugin's lineage, version by version:
 \item[v1.5] language seeds come from the editor's own filetype
   database---on Neovim and Vim alike (\cref{sec:askeditor}); the
   fixed tables remain as a last resort.
+\item[v1.6] editing support: chunk names complete and navigate
+  through the buffer's own omnifunc and tagfunc
+  (\cref{sec:navigation}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -77,13 +80,14 @@ no code from v1.2 or earlier remains, only the file layout and the
 group names.
 
 Everything in this repository tangles from this file.  The plugin's
-three files are the root chunks, named after their paths in the
+four files are the root chunks, named after their paths in the
 plugin tree:
 
 \begin{itemize}
 \item [[syntax/noweb.vim]],
-\item [[autoload/noweb.vim]], and
-\item [[ftdetect/noweb.vim]];
+\item [[autoload/noweb.vim]],
+\item [[ftdetect/noweb.vim]], and
+\item [[ftplugin/noweb.vim]];
 \end{itemize}
 
 the [[LICENSE]] tangles from here as well
@@ -105,11 +109,15 @@ here.
 \section{Overview}
 \label{sec:overview}
 
-The plugin is three small files with a one-way control flow:
+The plugin is four small files with a one-way control flow:
 
 \begin{description}
 \item[\texttt{ftdetect/noweb.vim}] tells Vim that [[*.nw]] buffers
   have filetype [[noweb]].
+\item[\texttt{ftplugin/noweb.vim}] runs when that filetype is set and
+  installs the buffer-local editing hooks: chunk names complete
+  through the buffer's omnifunc and resolve as tags through its
+  tagfunc (\cref{sec:navigation}).
 \item[\texttt{syntax/noweb.vim}] runs when that filetype's syntax is
   requested.  It loads Vim's \TeX{} syntax as the base---the whole
   buffer is prose by default---then defines the noweb markup items and
@@ -119,7 +127,8 @@ The plugin is three small files with a one-way control flow:
   the buffer, infer each chunk's language, include the needed language
   syntaxes, and layer one language-aware region per language on top of
   the fallback.  It re-runs on every write, so the highlighting
-  follows the file as it evolves.
+  follows the file as it evolves.  It also provides the completion
+  and navigation functions the ftplugin points at.
 \end{description}
 
 Two invariants make the layering work, and almost every design
@@ -207,7 +216,7 @@ ignores it but archaeologists should not have to run [[git log]].
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.5
+" Version:		1.6
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -215,6 +224,10 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.6: Editing support: chunk names complete through the buffer's
+"       omnifunc (picked up by YCM and friends), definitions resolve
+"       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c
+"       step through occurrences and :NowebRefs surveys them.
 " v1.5: Seed chunk languages from the editor's own filetype database
 "       (vim.filetype.match on Neovim; the filetypedetect autocommands
 "       run against a scratch buffer on Vim); the fixed tables remain
@@ -514,6 +527,20 @@ happens to be pedagogical order as well:
 <<[[s:include_lang]]>>
 
 <<[[noweb#refresh]]>>
+
+<<the [[s:DEF]] and [[s:REF]] patterns>>
+
+<<[[s:chunk_occurrences]]>>
+
+<<[[s:chunk_at_cursor]]>>
+
+<<[[noweb#complete]]>>
+
+<<[[noweb#tagfunc]]>>
+
+<<[[noweb#next_occurrence]]>>
+
+<<[[noweb#refs]]>>
 @
 
 <<autoload file header>>=
@@ -1092,15 +1119,414 @@ syntax sync clear
 syntax sync fromstart
 @
 
+\section{Completion and navigation}
+\label{sec:navigation}
+
+Up to v1.5 the plugin only ever \emph{showed} things.  This section
+adds the editing side: completing chunk names, jumping to a chunk's
+definition, and stepping through its appends and uses.
+
+The guiding principle is the one that served the language inference
+well (\cref{sec:askeditor}): hook the editor's native mechanisms
+rather than invent parallel ones.  Completion is exposed as the
+buffer's [['omnifunc']], which serves two masters at once: plain Vim
+users get \texttt{CTRL-X CTRL-O} with no configuration, and
+completion frameworks get their standard integration point---for a
+filetype it has no native engine for, YCM falls back to the buffer's
+omnifunc (its \enquote{omni completer}), and coc, nvim-cmp and
+asyncomplete all ship omnifunc bridges.  Navigation is exposed as the
+buffer's [['tagfunc']] (\cref{sec:tagfunc}), which similarly makes
+the whole family of tag commands work unmapped.  One implementation,
+every frontend.
+
+\subsection{The filetype plugin}
+\label{sec:ftplugin}
+
+Both hooks are buffer-local options, and the conventional owner of
+buffer-local options is a filetype plugin: Vim sources
+[[ftplugin/noweb.vim]] whenever a buffer's filetype becomes
+[[noweb]].  This is the plugin's fourth tangled file.  The
+implementations live in the autoload file with the rest of the
+machinery and load on first use; the ftplugin only points at them.
+
+<<[[ftplugin/noweb.vim]]>>=
+" ftplugin/noweb.vim -- completion and navigation for noweb sources
+"
+" Buffer-local hooks only: the implementations live in
+" autoload/noweb.vim and load on first use.
+
+if exists('b:did_ftplugin')
+  finish
+endif
+let b:did_ftplugin = 1
+
+<<hook completion and navigation into the buffer>>
+
+<<register the chunk-reference trigger with YCM>>
+
+<<the occurrence maps and the [[:NowebRefs]] command>>
+@
+
+[[b:undo_ftplugin]] is the ftplugin counterpart of the syntax file's
+idempotence concerns (\cref{sec:building}): when the filetype changes
+away from [[noweb]], Vim runs it to undo everything we set.  The
+[['tagfunc']] option is younger than the rest of what the plugin
+relies on (Vim 8.2), hence the feature test---on an older Vim the
+plugin degrades to completion only.
+
+<<hook completion and navigation into the buffer>>=
+setlocal omnifunc=noweb#complete
+let b:undo_ftplugin = 'setlocal omnifunc<'
+if exists('+tagfunc')
+  setlocal tagfunc=noweb#tagfunc
+  let b:undo_ftplugin .= ' tagfunc<'
+endif
+@
+
+YCM completes through the omnifunc above, but fires it only when the
+typed text matches a per-filetype \emph{trigger sequence}---and it
+has no default trigger for this filetype.  Registering [[@<<]] makes
+the popup appear exactly when a chunk reference begins.  The
+[[has_key]] guard keeps the registration polite: a user who has
+chosen their own trigger, or disabled one, wins.  (Other frameworks
+need no help here: their omnifunc bridges come with their own
+triggering configuration.)
+
+<<register the chunk-reference trigger with YCM>>=
+" YCM fires the omnifunc on a per-filetype trigger sequence and has no
+" default for noweb; register @<< unless the user chose their own.
+let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
+if !has_key(g:ycm_semantic_triggers, 'noweb')
+  let g:ycm_semantic_triggers.noweb = ['@<<']
+endif
+@
+
+The remaining navigation surface is small: a motion pair stepping
+through a chunk's occurrences (\texttt{]c} and \texttt{[c}, mirroring
+Vim's bracket-motion family) and a command collecting them in the
+location list.  The maps go through [[<Plug>]] indirection and yield
+to the user twice over: a [[g:noweb_no_maps]] switch suppresses them
+wholesale, and [[hasmapto]] skips any the user has already bound to
+their own keys.  (\texttt{]c}/\texttt{[c} also mean
+\enquote{next/previous change} in diff mode; diffed noweb sources are
+rare, but remapping the [[<Plug>]]s moves ours out of the way.)
+
+<<the occurrence maps and the [[:NowebRefs]] command>>=
+command! -buffer NowebRefs call noweb#refs()
+
+nnoremap <silent> <Plug>(noweb-next-occurrence)
+      \ :<C-u>call noweb#next_occurrence(1)<CR>
+nnoremap <silent> <Plug>(noweb-prev-occurrence)
+      \ :<C-u>call noweb#next_occurrence(-1)<CR>
+if !get(g:, 'noweb_no_maps', 0)
+  if !hasmapto('<Plug>(noweb-next-occurrence)', 'n')
+    nmap <buffer> ]c <Plug>(noweb-next-occurrence)
+  endif
+  if !hasmapto('<Plug>(noweb-prev-occurrence)', 'n')
+    nmap <buffer> [c <Plug>(noweb-prev-occurrence)
+  endif
+endif
+
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
+      \ . ' | silent! nunmap <buffer> [c'
+      \ . ' | silent! delcommand -buffer NowebRefs'
+@
+
+\subsection{Scanning for occurrences}
+\label{sec:occurrences}
+
+Completion and navigation both need the same inventory: where is
+every chunk defined (possibly several times---noweb definitions
+accumulate), and where is every chunk used?  The language-inference
+scan of \cref{sec:infer} walks the same lines but answers a different
+question, tracking per-chunk language state; the two scans stay
+separate so neither carries the other's bookkeeping.
+
+The patterns are shared by everything in this section.  A definition
+is a header alone on its line.  A reference is any [[@<<name@>>]]
+whose brackets are not escaped---in code chunks a literal [[@<<]] is
+written with a leading [[@]], and those escapes must not surface as
+phantom chunks in the completion menu (the language scan can afford
+to ignore this; a use edge from a phantom name simply never
+propagates anywhere).  The name may contain blanks, but not start or
+end with one, mirroring noweb's own markup.
+
+<<the [[s:DEF]] and [[s:REF]] patterns>>=
+" A chunk definition alone on its line, and a chunk reference whose
+" brackets are not @-escaped; both capture the name via \zs / \ze.
+let s:DEF = '^@<<\zs.\{-}\ze@>>=\s*$'
+let s:REF = '@\@1<!@<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze@\@1<!@>>'
+@
+
+The scanner is the same state machine as the language scan: a header
+enters code mode, a text-chunk marker leaves it, and references are
+collected only \emph{inside} code---in prose, [[@<<...@>>]] is just
+text to noweb, so it must be just text to us.  Each occurrence is a
+(line, column) pair pointing at the first bracket, ready for a jump.
+
+<<[[s:chunk_occurrences]]>>=
+" Scan the buffer and return {chunk name -> {'defs': [...], 'uses': [...]}}
+" where every entry is a [lnum, col] pair (1-based, at the first <).
+" A chunk defined n times has n defs -- appends are definitions too.
+function! s:chunk_occurrences() abort
+  let l:occ = {}
+  let l:in_code = 0
+  let l:lnum = 0
+  for l:line in getline(1, '$')
+    let l:lnum += 1
+    if l:line =~# s:DEF
+      let l:in_code = 1
+      call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
+    elseif l:in_code && l:line =~# '^@\($\| \)'
+      let l:in_code = 0
+    elseif l:in_code
+      <<record every reference on the line>>
+    endif
+  endfor
+  return l:occ
+endfunction
+
+function! s:entry(occ, name) abort
+  if !has_key(a:occ, a:name)
+    let a:occ[a:name] = {'defs': [], 'uses': []}
+  endif
+  return a:occ[a:name]
+endfunction
+@
+
+[[matchstrpos]] returns the matched name with its start and end;
+[[\zs]] puts the start two bytes past the opening bracket, hence the
+arithmetic when recording the bracket's own column and when resuming
+the scan past the closing pair.
+
+<<record every reference on the line>>=
+let l:start = 0
+while 1
+  let l:mp = matchstrpos(l:line, s:REF, l:start)
+  if l:mp[1] < 0
+    break
+  endif
+  call add(s:entry(l:occ, l:mp[0]).uses, [l:lnum, l:mp[1] - 1])
+  let l:start = l:mp[2] + 2
+endwhile
+@
+
+Navigation commands also need to know which chunk the cursor is
+\emph{on}.  A definition claims its whole line---the natural target
+of \enquote{go somewhere from here} is the header's chunk wherever
+the cursor stands on that line.  Elsewhere the cursor must actually
+be within a reference, brackets included.
+
+<<[[s:chunk_at_cursor]]>>=
+" The chunk definition or reference under the cursor, or ''.
+function! s:chunk_at_cursor() abort
+  let l:line = getline('.')
+  let l:name = matchstr(l:line, s:DEF)
+  if l:name !=# ''
+    return l:name
+  endif
+  let l:cur = col('.') - 1
+  let l:start = 0
+  while 1
+    let l:mp = matchstrpos(l:line, s:REF, l:start)
+    if l:mp[1] < 0
+      return ''
+    endif
+    if l:cur >= l:mp[1] - 2 && l:cur < l:mp[2] + 2
+      return l:mp[0]
+    endif
+    let l:start = l:mp[2] + 2
+  endwhile
+endfunction
+@
+
+\subsection{Completing chunk names}
+\label{sec:complete}
+
+An omnifunc is called twice per completion
+([[:h complete-functions]]): first with [[a:findstart]] set, to answer
+\emph{where does the text being completed begin}, then with the text
+accumulated so far as [[a:base]], to produce candidates.  Owning the
+start column is what makes chunk names with blanks completable at
+all---an identifier-based engine can never see past a space, which
+is precisely why YCM's default identifier collector is no help for
+chunk names and the omnifunc route is worth a section of its own.
+
+Completion begins right after the last unescaped [[@<<]] before the
+cursor.  If a [[>]] already intervenes, the reference is closed and
+we are past it: returning $-3$ cancels quietly instead of beeping.
+
+<<find the start of the chunk name being completed>>=
+let l:before = strpart(getline('.'), 0, col('.') - 1)
+let l:start = matchend(l:before, '.*@\@1<!@<<')
+if l:start < 0 || stridx(l:before, '>', l:start) >= 0
+  return -3
+endif
+return l:start
+@
+
+The candidates are every known chunk name---defined ones and
+referenced-but-undefined ones alike.  Offering the undefined ones is
+deliberate: writing the use before the definition is normal literate
+style, and the [[menu]] column showing \enquote{undefined} against a
+name doubles as typo detection.  Defined chunks show their append
+count instead.
+
+Each candidate closes the reference for you: the inserted text is
+[[name@>>]], unless the character after the cursor is already a
+[[>]].  The popup stays readable through [[abbr]], which is what the
+menu displays in place of the [[word]] actually inserted.
+
+<<collect the matching chunk names>>=
+let l:occ = s:chunk_occurrences()
+let l:close = getline('.')[col('.') - 1] ==# '>' ? '' : '@>>'
+let l:items = []
+for l:name in sort(keys(l:occ))
+  if stridx(l:name, a:base) != 0
+    continue
+  endif
+  let l:n = len(l:occ[l:name].defs)
+  call add(l:items, {
+        \ 'word': l:name . l:close,
+        \ 'abbr': l:name,
+        \ 'menu': l:n == 0 ? 'undefined' : l:n == 1 ? 'def' : 'def+' . (l:n - 1),
+        \ })
+endfor
+return l:items
+@
+
+<<[[noweb#complete]]>>=
+" Omnifunc completing chunk names after @<< (:h complete-functions).
+function! noweb#complete(findstart, base) abort
+  if a:findstart
+    <<find the start of the chunk name being completed>>
+  endif
+  <<collect the matching chunk names>>
+endfunction
+@
+
+\subsection{Definitions are tags}
+\label{sec:tagfunc}
+
+Chunk definitions map onto Vim's tag model with almost suspicious
+precision.  A chunk may be defined many times---each append is
+another definition---and a tag may have many matches: so
+\texttt{CTRL-]} on a reference jumps to the first definition,
+[[:tnext]] steps through the appends, \texttt{CTRL-T} pops back up
+the tag stack, and \texttt{g]} or [[:tselect]] lists all of them.  All of
+that behaviour comes from the [['tagfunc']] option; none of it needs
+a mapping.
+
+Two details deserve their comment.  When the tagfunc is invoked by a
+normal-mode command, [[a:flags]] contains [[c]] and the function may
+consult the cursor---which we must, because the [[a:pattern]] Vim
+passes is derived from the word under the cursor and chunk names may
+contain blanks.  And each match locates its definition by \emph{line
+number} rather than the conventional search pattern: every append of
+a chunk shares the byte-identical header line, so a pattern could
+only ever find the first one.
+
+Returning [[v:null]] (rather than an empty list) when the cursor is
+not on a chunk hands the lookup back to Vim's regular tags machinery,
+so \texttt{CTRL-]} elsewhere in the buffer still searches any tags
+file the user has.  An empty list would instead declare
+\enquote{no such tag} ourselves---which is exactly right for a chunk
+that is referenced but never defined.
+
+<<[[noweb#tagfunc]]>>=
+" Tagfunc resolving chunk names: every definition of the chunk is one
+" tag match, in file order, so CTRL-] jumps to the first definition
+" and :tnext steps through the appends.  Invoked by a normal-mode
+" command ('c' in a:flags), the name comes from the cursor rather
+" than a:pattern, which cannot hold the blanks chunk names may have.
+function! noweb#tagfunc(pattern, flags, info) abort
+  let l:name = stridx(a:flags, 'c') >= 0 ? s:chunk_at_cursor() : a:pattern
+  let l:occ = s:chunk_occurrences()
+  if l:name ==# ''
+    return v:null
+  endif
+  if !has_key(l:occ, l:name)
+    return stridx(a:flags, 'c') >= 0 ? [] : v:null
+  endif
+  let l:tags = []
+  for l:def in l:occ[l:name].defs
+    " The cmd is the definition's line number: appends share identical
+    " header lines, so a search pattern could not tell them apart.
+    call add(l:tags, {'name': l:name, 'filename': expand('%:p'),
+          \ 'cmd': string(l:def[0]), 'kind': 'd'})
+  endfor
+  return l:tags
+endfunction
+@
+
+\subsection{Stepping through uses and appends}
+\label{sec:refs}
+
+The motion jumps to the next or previous occurrence of the chunk
+under the cursor---definition or use, the pattern matches both.
+[[m']] first: the jump is a real jump, so \texttt{CTRL-O} and
+[[``]] return to where it started.  The search wraps, making
+\texttt{]c} from the last occurrence a quick way home to the first.
+
+<<[[noweb#next_occurrence]]>>=
+" The ]c / [c motion: the next (dir > 0) or previous occurrence --
+" definition or use -- of the chunk under the cursor, wrapping.
+function! noweb#next_occurrence(dir) abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  normal! m'
+  call search('@\@1<!@<<' . s:re_escape(l:name) . '@>>',
+        \ a:dir > 0 ? 'w' : 'bw')
+endfunction
+@
+
+[[:NowebRefs]] shows the whole picture at once: the location list
+gets one entry per occurrence, definitions and uses in file order,
+and the list window opens for browsing.  The location list rather
+than the quickfix list because the survey is a per-window affair; a
+second window surveying another chunk should not clobber it.
+
+<<[[noweb#refs]]>>=
+" Fill the location list with every definition and use of the chunk
+" under the cursor, in file order, and open it.
+function! noweb#refs() abort
+  let l:name = s:chunk_at_cursor()
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  let l:occ = get(s:chunk_occurrences(), l:name, {'defs': [], 'uses': []})
+  let l:places = sort(l:occ.defs + l:occ.uses,
+        \ {a, b -> a[0] == b[0] ? a[1] - b[1] : a[0] - b[0]})
+  let l:items = []
+  for l:place in l:places
+    call add(l:items, {'bufnr': bufnr('%'), 'lnum': l:place[0],
+          \ 'col': l:place[1], 'text': getline(l:place[0])})
+  endfor
+  call setloclist(0, [], ' ', {'title': '@<<' . l:name . '@>>',
+        \ 'items': l:items})
+  lopen
+endfunction
+
+function! s:no_chunk() abort
+  echohl WarningMsg
+  echomsg 'noweb: no chunk name under the cursor'
+  echohl None
+endfunction
+@
+
 \section{Building and maintaining}
 \label{sec:building}
 
 Editing this file follows the usual literate loop: edit
 [[vim-noweb.nw]], run [[make]], and commit the [[.nw]] together with
 the re-tangled files.  [[make check]] enforces the two things worth
-enforcing: [[noroots]] must report exactly the three root chunks (an
-extra root is a typo'd chunk reference), and the tangled files must
-match the working tree.
+enforcing: [[noroots]] must report exactly the intended root chunks
+(an extra root is a typo'd chunk reference), and the tangled files
+must match the working tree.
 
 The license is MIT, tangled from here so that the title page can
 show the same text the repository ships.  Versions 1.0--1.2 carried no

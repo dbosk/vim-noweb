@@ -5,6 +5,7 @@
 
 NWSRC=	vim-noweb.nw
 TANGLED=	syntax/noweb.vim autoload/noweb.vim ftdetect/noweb.vim
+TANGLED+=	ftplugin/noweb.vim
 TANGLED+=	LICENSE
 
 .PHONY: all
@@ -13,6 +14,7 @@ all: ${TANGLED}
 # -t8 keeps the tabs in the syntax file's header comment; cpif only
 # touches a file when its content actually changed.
 ${TANGLED}: ${NWSRC}
+	mkdir -p ${@D}
 	notangle -t8 -R"[[$@]]" ${NWSRC} | cpif $@
 
 vim-noweb.tex: ${NWSRC}
@@ -29,7 +31,7 @@ vim-noweb.pdf: vim-noweb.tex LICENSE
 .PHONY: check
 check: all
 	noroots ${NWSRC}
-	git diff --exit-code -- syntax autoload ftdetect LICENSE
+	git diff --exit-code -- syntax autoload ftdetect ftplugin LICENSE
 
 .PHONY: clean
 clean:

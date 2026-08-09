@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.5
+" Version:		1.6
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,10 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.6: Editing support: chunk names complete through the buffer's
+"       omnifunc (picked up by YCM and friends), definitions resolve
+"       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c
+"       step through occurrences and :NowebRefs surveys them.
 " v1.5: Seed chunk languages from the editor's own filetype database
 "       (vim.filetype.match on Neovim; the filetypedetect autocommands
 "       run against a scratch buffer on Vim); the fixed tables remain
