@@ -68,8 +68,8 @@ The plugin's lineage, version by version:
   language syntaxes and against runaway \TeX{} regions.  The
   rationale for those defences is the bulk of this document.
 \item[v1.5] language seeds come from the editor's own filetype
-  database on Neovim (\cref{sec:askeditor}); the fixed tables remain
-  as a fallback.
+  database---on Neovim and Vim alike (\cref{sec:askeditor}); the
+  fixed tables remain as a last resort.
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -216,8 +216,9 @@ ignores it but archaeologists should not have to run [[git log]].
 " virtually no code from v1.2 or earlier remains.
 "
 " v1.5: Seed chunk languages from the editor's own filetype database
-"       (vim.filetype.match) on Neovim; the fixed tables remain as a
-"       fallback for other Vims.
+"       (vim.filetype.match on Neovim; the filetypedetect autocommands
+"       run against a scratch buffer on Vim); the fixed tables remain
+"       as a last resort.
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
 "       chunk headers (sh here-docs used to eat chunk bodies), implicit
@@ -500,6 +501,8 @@ happens to be pedagogical order as well:
 
 <<[[s:filetype_match]]>>
 
+<<[[s:detect_in_scratch]]>>
+
 <<[[s:lexer_for_chunk]]>>
 
 <<[[s:shebang_lang]]>>
@@ -531,13 +534,18 @@ happens to be pedagogical order as well:
 \label{sec:askeditor}
 
 Everything this file wants to know about names and shebangs is data
-the editor already maintains: Neovim's filetype database maps
-filenames \emph{and} file contents to filetypes, and filetypes are
-precisely the names [[:syntax include]] wants.  Asking it instead of
-keeping our own tables removes the redundancy, keeps the answers in
-sync with the editor across upgrades, and widens coverage to every
-language Neovim can detect---[[x.zsh]] becomes [[zsh]], not the
-[[sh]] our table used to approximate it with.
+the editor already maintains, mapping filenames \emph{and} file
+contents to filetypes---and filetypes are precisely the names
+[[:syntax include]] wants.  Both Vim lineages can be asked.  Neovim
+exposes its database as a function, [[vim.filetype.match]]; Vim keeps
+the same database in autocommand form (the [[filetypedetect]] group:
+[[filetype.vim]], plus [[scripts.vim]] for shebangs), which cannot be
+called---but it can be \emph{run}, against a throwaway buffer.
+Asking the editor instead of keeping our own tables removes the
+redundancy, keeps the answers in sync with the editor across
+upgrades, and widens coverage to every language the editor can
+detect---[[x.zsh]] becomes [[zsh]], not the [[sh]] our table used to
+approximate it with.
 
 Edit-time inference may now disagree with weave-time autolang in
 corner cases (autolang asks Pygments, which calls the same chunk
@@ -545,24 +553,70 @@ corner cases (autolang asks Pygments, which calls the same chunk
 \emph{its} medium highlights the chunk.
 
 The results are cached because chunk names recur on every refresh and
-the database does not change within a session.  On anything that is
-not Neovim the function answers [['']], which routes every caller to
-its fallback table.
+the database does not change within a session.  Only when there is no
+database at all---filetype detection switched off, or a Vim too old
+to have the group---does the function answer [['']] and route every
+caller to its fallback table.
 
 <<[[s:filetype_match]]>>=
-" Ask Neovim's filetype database (vim.filetype.match) for ARGS, e.g.
-" {'filename': ...} or {'filename': ..., 'contents': [...]}.  Returns
-" '' when there is no answer or no database (not Neovim).
+" Ask the editor's filetype database for ARGS, e.g. {'filename': ...}
+" or {'filename': ..., 'contents': [...]}.  Returns '' when there is
+" no answer or no database to ask.
 let s:ft_cache = {}
 function! s:filetype_match(args) abort
-  if !has('nvim')
-    return ''
-  endif
   let l:key = string(a:args)
   if !has_key(s:ft_cache, l:key)
-    let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+    if has('nvim')
+      let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+    elseif exists('#filetypedetect#BufRead')
+      let s:ft_cache[l:key] = s:detect_in_scratch(a:args)
+    else
+      let s:ft_cache[l:key] = ''
+    endif
   endif
   return s:ft_cache[l:key]
+endfunction
+@
+
+On Vim the query is a small performance: create a throwaway buffer
+whose name is the candidate filename---under a session-unique
+directory that does not exist, so no real file or buffer can
+collide---give it the shebang line as contents, and fire the
+[[filetypedetect]] autocommands at it.  [[eventignore]] does the
+chaperoning.  Everything is suppressed while the buffer comes and
+goes, so no other plugin reacts to a buffer that lives for a
+millisecond; during the detection itself only [[FileType]] stays
+suppressed, because the detection must be free to assign
+[[&filetype]]---that assignment is the answer we read---but nothing
+should start loading ftplugins over it.  The cache above makes the
+cost irrelevant: one throwaway buffer per unique question per
+session.
+
+<<[[s:detect_in_scratch]]>>=
+" Vim's counterpart of vim.filetype.match: run the filetypedetect
+" autocommands against a throwaway buffer with the candidate name and
+" contents, and read the &filetype they assign.
+let s:scratch_dir = tempname()
+function! s:detect_in_scratch(args) abort
+  let l:ft = ''
+  let l:eventignore = &eventignore
+  set eventignore=all
+  try
+    silent execute 'keepalt new'
+          \ fnameescape(s:scratch_dir . '/' . get(a:args, 'filename', 'noweb-chunk'))
+    setlocal buftype=nofile noswapfile
+    if has_key(a:args, 'contents')
+      call setline(1, a:args['contents'])
+    endif
+    set eventignore=FileType
+    silent doautocmd filetypedetect BufRead
+    let l:ft = &l:filetype
+  finally
+    set eventignore=all
+    silent! bwipeout!
+    let &eventignore = l:eventignore
+  endtry
+  return l:ft
 endfunction
 @
 

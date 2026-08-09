@@ -45,19 +45,48 @@ let s:interpreters = {
 
 let s:CONFLICT = "\x00conflict\x00"
 
-" Ask Neovim's filetype database (vim.filetype.match) for ARGS, e.g.
-" {'filename': ...} or {'filename': ..., 'contents': [...]}.  Returns
-" '' when there is no answer or no database (not Neovim).
+" Ask the editor's filetype database for ARGS, e.g. {'filename': ...}
+" or {'filename': ..., 'contents': [...]}.  Returns '' when there is
+" no answer or no database to ask.
 let s:ft_cache = {}
 function! s:filetype_match(args) abort
-  if !has('nvim')
-    return ''
-  endif
   let l:key = string(a:args)
   if !has_key(s:ft_cache, l:key)
-    let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+    if has('nvim')
+      let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+    elseif exists('#filetypedetect#BufRead')
+      let s:ft_cache[l:key] = s:detect_in_scratch(a:args)
+    else
+      let s:ft_cache[l:key] = ''
+    endif
   endif
   return s:ft_cache[l:key]
+endfunction
+
+" Vim's counterpart of vim.filetype.match: run the filetypedetect
+" autocommands against a throwaway buffer with the candidate name and
+" contents, and read the &filetype they assign.
+let s:scratch_dir = tempname()
+function! s:detect_in_scratch(args) abort
+  let l:ft = ''
+  let l:eventignore = &eventignore
+  set eventignore=all
+  try
+    silent execute 'keepalt new'
+          \ fnameescape(s:scratch_dir . '/' . get(a:args, 'filename', 'noweb-chunk'))
+    setlocal buftype=nofile noswapfile
+    if has_key(a:args, 'contents')
+      call setline(1, a:args['contents'])
+    endif
+    set eventignore=FileType
+    silent doautocmd filetypedetect BufRead
+    let l:ft = &l:filetype
+  finally
+    set eventignore=all
+    silent! bwipeout!
+    let &eventignore = l:eventignore
+  endtry
+  return l:ft
 endfunction
 
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.

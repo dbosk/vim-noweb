@@ -12,8 +12,9 @@
 " virtually no code from v1.2 or earlier remains.
 "
 " v1.5: Seed chunk languages from the editor's own filetype database
-"       (vim.filetype.match) on Neovim; the fixed tables remain as a
-"       fallback for other Vims.
+"       (vim.filetype.match on Neovim; the filetypedetect autocommands
+"       run against a scratch buffer on Vim); the fixed tables remain
+"       as a last resort.
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
 "       chunk headers (sh here-docs used to eat chunk bodies), implicit
