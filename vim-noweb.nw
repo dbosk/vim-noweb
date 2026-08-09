@@ -1,0 +1,1156 @@
+\documentclass[a4paper,10pt,article,oneside,oldfontcommands]{memoir}
+\let\subsubsection\subsection
+\let\subsection\section
+\let\section\chapter
+
+% The preamble is inline rather than in a preamble.tex of its own: this
+% repository has exactly one document, and keeping everything in one file
+% keeps the tangle roots down to the plugin's own files.
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[minted]{noweb}
+\noweboptions{longxref,breakcode,shift}
+\setminted{autogobble}
+\usepackage{csquotes}
+\usepackage{hyperref}
+\usepackage[capitalise]{cleveref}
+
+% [[...]] quotes in section headings become hyperlinked identifiers when
+% noweave's -index is active; hyperref breaks when those links expand in
+% moving arguments (ToC, bookmarks).  Make the link macro robust and strip
+% the quoting macros from PDF bookmark strings.
+\DeclareRobustCommand\nwhyperreference[2]{\hyperlink{noweb.#1}{#2}}
+\pdfstringdefDisableCommands{%
+  \def\nwlinkedidentq#1#2{#1}%
+  \let\Tt\relax
+  \let\nwendquote\relax
+}
+
+\title{%
+  vim-noweb: reliable noweb syntax highlighting for Vim
+}
+\author{%
+  Daniel Bosk\thanks{%
+    The plugin descends from the \texttt{nw.vim} of Xun Gong and Dirk
+    Baechle, mirrored from vim.org script 2129.}
+}
+
+\begin{document}
+\maketitle
+\vfill
+\inputminted[numbers=none]{text}{LICENSE}
+\clearpage
+\tableofcontents
+\clearpage
+
+@
+\section{Introduction}
+
+This is the literate source of vim-noweb, a Vim plugin that highlights
+noweb files---files like this one.  A noweb source is a \TeX{} document
+interrupted by code chunks: a chunk is introduced by [[@<<name@>>=]] in
+the first column, ended by an [[@]] followed by a space or newline (or
+implicitly by the next chunk definition), and chunks refer to each
+other with [[@<<name@>>]].  The plugin highlights the prose as \TeX{},
+marks the noweb markup---chunk headers, chunk references and
+[[[[...]]]] code quotes---and highlights each code chunk's body in the
+chunk's own language, which it infers the same way noweb's
+\enquote{autolang} filter does.
+
+The plugin's lineage, version by version:
+
+\begin{description}
+\item[v1.0--v1.2] the original \texttt{nw.vim} of Xun Gong and Dirk
+  Baechle, mirrored from vim.org script 2129.
+\item[v1.3] per-chunk language inference, ported from noweb's
+  \enquote{autolang} filter.
+\item[v1.4] reliable highlighting: defences against the included
+  language syntaxes and against runaway \TeX{} regions.  The
+  rationale for those defences is the bulk of this document.
+\item[v1.5] language seeds come from the editor's own filetype
+  database---on Neovim and Vim alike (\cref{sec:askeditor}); the
+  fixed tables remain as a last resort.
+\end{description}
+
+Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
+no code from v1.2 or earlier remains, only the file layout and the
+group names.
+
+Everything in this repository tangles from this file.  The plugin's
+three files are the root chunks, named after their paths in the
+plugin tree:
+
+\begin{itemize}
+\item [[syntax/noweb.vim]],
+\item [[autoload/noweb.vim]], and
+\item [[ftdetect/noweb.vim]];
+\end{itemize}
+
+the [[LICENSE]] tangles from here as well
+(\cref{sec:building}).  The tangled files are committed
+alongside this source---a deliberate deviation from the usual
+never-commit-generated rule, because a Vim plugin must work from a
+bare [[git clone]]; plugin managers do not run notangle.
+\Cref{sec:building} describes the build and the conventions this file
+itself must follow (notably: every literal [[<<]] or [[>>]] inside a
+code chunk is escaped as [[@<<]] and [[@>>]]).
+
+One constraint shaped the initial literate conversion: the tangled
+files had to reproduce the then hand-written files byte for byte, so
+that [[git diff]] could prove the conversion changed nothing.  That
+constraint served its purpose and has been lifted; this document is
+now the only source, and the code chunks---comments included---evolve
+here.
+
+\section{Overview}
+\label{sec:overview}
+
+The plugin is three small files with a one-way control flow:
+
+\begin{description}
+\item[\texttt{ftdetect/noweb.vim}] tells Vim that [[*.nw]] buffers
+  have filetype [[noweb]].
+\item[\texttt{syntax/noweb.vim}] runs when that filetype's syntax is
+  requested.  It loads Vim's \TeX{} syntax as the base---the whole
+  buffer is prose by default---then defines the noweb markup items and
+  a \emph{fallback} region for code chunks, whose bodies it leaves
+  unhighlighted.  Finally it calls [[noweb#refresh()]].
+\item[\texttt{autoload/noweb.vim}] provides [[noweb#refresh()]]: scan
+  the buffer, infer each chunk's language, include the needed language
+  syntaxes, and layer one language-aware region per language on top of
+  the fallback.  It re-runs on every write, so the highlighting
+  follows the file as it evolves.
+\end{description}
+
+Two invariants make the layering work, and almost every design
+decision below traces back to one of them:
+
+\begin{description}
+\item[Definition order is priority.]  When several syntax items can
+  start at the same position, the \emph{last defined} wins
+  (\texttt{:h syn-priority}).  We exploit this deliberately, twice:
+  the language-aware regions are built after the fallback region, so
+  a chunk header starts a language region rather than the fallback
+  (\cref{sec:fallback,sec:refresh}); and the item marking chunk
+  references inside code is redefined after every included language,
+  so it beats that language's lookalike patterns (\cref{sec:refresh}).
+\item[Included syntaxes are hostile guests.]  [[:syntax include]]
+  imports another filetype's rules wholesale, and some of them misfire
+  on noweb markup.  The shell syntax, for instance, reads [[@<<word]]
+  as the start of a here-document string---on a chunk header line
+  that used to paint the whole chunk body as one string.  Sync rules
+  come along too, and they are buffer-global: they tell Vim where it
+  may restart parsing when scrolling, and the imported rules made it
+  restart as if mid-chunk lines were top-level prose.  The defences
+  are [[matchgroup]] on chunk headers (\cref{sec:fallback}), the
+  late-defined chunk-reference item, and discarding every imported
+  sync rule in favour of syncing from the start of the file (both in
+  \cref{sec:refresh}).
+\end{description}
+
+There is a third, external adversary: the \TeX{} base syntax itself
+can open a multi-line region in prose (an optional argument, a group)
+that swallows everything that follows, chunk headers included.  The
+chunk regions therefore carry [[containedin=tex.*]] so a header
+\emph{always} starts a chunk, and a small recovery item closes stolen
+[[[[...]]]] quotes (\cref{sec:quoting,sec:orphan}).
+
+\section{Filetype detection}
+
+Vim sources every [[ftdetect]] file on startup.  We use
+[[setfiletype]] rather than [[set filetype=]]: [[setfiletype]] is a
+no-op when the filetype is already set, so a user autocmd that assigns
+the filetype itself (as the author's vimrc has done for years) keeps
+working unchanged, whichever of the two fires first.
+
+<<[[ftdetect/noweb.vim]]>>=
+" setfiletype yields if the filetype is already set, so this coexists with
+" any user autocmd doing the same.
+autocmd BufRead,BufNewFile *.nw setfiletype noweb
+@
+
+\section{The syntax file}
+
+The file reads top to bottom in the order Vim executes it: guard,
+\TeX{} base, prose-level markup, the fallback chunk region, highlight
+links, and finally the hand-over to the language-inference machinery.
+
+<<[[syntax/noweb.vim]]>>=
+<<syntax file header>>
+
+<<bail out if a syntax is already active>>
+
+
+<<load the \TeX{} base syntax>>
+
+<<quoting and chunk-name markup>>
+
+<<recover quoting stolen by \TeX{} option arguments>>
+
+<<fallback code-chunk region>>
+
+<<mark text-chunk starts>>
+
+<<default highlight links>>
+
+<<language-inference bootstrap>>
+@
+
+\subsection{Header and guard}
+
+The header block carries the provenance and the version history; Vim
+ignores it but archaeologists should not have to run [[git log]].
+
+<<syntax file header>>=
+" Vim syntax file
+" Language:		NOWEB
+" Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
+" Maintainer:		Daniel Bosk <dbosk@kth.se>
+" Date:			2026-08-09
+" Version:		1.5
+" Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
+
+" History
+"
+" Versions 1.3 and 1.4 together amount to a complete rewrite:
+" virtually no code from v1.2 or earlier remains.
+"
+" v1.5: Seed chunk languages from the editor's own filetype database
+"       (vim.filetype.match on Neovim; the filetypedetect autocommands
+"       run against a scratch buffer on Vim); the fixed tables remain
+"       as a last resort.
+" v1.4: Make highlighting reliable: sync from start (included language
+"       syntaxes used to hijack the buffer's sync rules), matchgroup on
+"       chunk headers (sh here-docs used to eat chunk bodies), implicit
+"       chunk termination at the next @<<name@>>=, oneline [[...]], and
+"       unconditional hi def links (they survive :syntax off/on now).
+" v1.3: Detect each code chunk's language (autolang-style: filename-like
+"       chunk names, #! lines, and propagation along @<<use@>> edges) and
+"       highlight chunk bodies in that language.  See autoload/noweb.vim.
+" v1.2: Major revision, fixed bug with modern "tex.vim"
+" v1.1: Corrected `current_syntax = "noweb"' to
+"                 `current_syntax = "nw"'
+"
+" v1.0: Initial version
+
+" NOWEB is a collection of tools for "Literate Programming". 
+" Unlike WEB or CWEB it is not bound to a specific programming
+" language like PASCAL or C.
+" For more informations about NOWEB, the sources or binary distributions
+" have a look at 
+"
+" http://www.eecs.harvard.edu/~nr/noweb
+"
+
+" For informations about "Literate Programming" in general
+"
+" http://www.literateprogramming.com
+"
+" could be a place to start.
+"
+@
+
+The guard is the standard syntax-file idiom: if some syntax is already
+active for the buffer, a second [[:runtime syntax/noweb.vim]] must not
+redefine everything on top of it.  The [[version < 600]] branch is
+fossil compatibility kept verbatim from v1.2.
+
+<<bail out if a syntax is already active>>=
+" Remove any old syntax stuff hanging around
+if version < 600
+  syntax clear
+elseif exists("b:current_syntax")
+  finish
+endif
+@
+
+\subsection{The \TeX{} base}
+
+Like CWEB's [[cweb.vim]], we treat the whole file as \TeX{} and punch
+the code chunks out of it, so there is no \enquote{documentation
+region}---prose is simply the top level.  The [[unlet]] afterwards
+matters: [[tex.vim]] sets [[b:current_syntax]], and if we left it set,
+our own guard-style checks further down the runtime path would think
+the buffer already done; we are not finished defining the syntax yet.
+
+<<load the \TeX{} base syntax>>=
+" Like in CWEB, a NOWEB source file is treated as a TeX file
+" including code chunks in between.
+if version < 600
+  source <sfile>:p:h/tex.vim
+else
+  runtime! syntax/tex.vim
+  unlet b:current_syntax
+endif
+@
+
+\subsection{Quoting and chunk names in prose}
+\label{sec:quoting}
+
+Noweb prose quotes code as [[[[...]]]] and may mention chunks as
+[[@<<name@>>]]; both get their own items.  Two details are load-bearing:
+
+\begin{description}
+\item[ [[oneline]]: ] an unbalanced [[[[]] in prose used to open a
+  region that ran to the end of the file and painted everything after
+  it as [[Constant]].  Noweb's quoting is one-line in practice, so
+  bounding the item costs nothing and removes the failure mode.
+\item[ [[containedin=tex.*]]: ] these items are top-level, but \TeX{}
+  regions opened in prose (optional arguments, groups, math) would
+  otherwise hide the markup inside them.  Being injectable into every
+  [[tex]]-prefixed group keeps the markup visible wherever prose ended
+  up.  The v1.3 code named [[tex.*Zone]] groups here---groups which
+  vimtex, the \TeX{} syntax actually loaded on this machine, does not
+  even define.
+\end{description}
+
+<<quoting and chunk-name markup>>=
+" containedin=tex.* lets these match even when a tex region has swallowed
+" the surrounding prose (e.g. an unclosed optional-argument [ ... ), which
+" vimtex can open across lines via nextgroup chains.
+syn region  nowebTT     start="\[\["hs=s+2 end="\]\]"he=e-2 oneline containedin=tex.*
+syn region  nowebName   start="@<<" end="@>>" oneline contains=nowebTT containedin=tex.*
+@
+
+\subsection{Recovering quoting stolen by option arguments}
+\label{sec:orphan}
+
+One adversary cannot be beaten by definition order: [[nextgroup]].
+After [[\begin{quote}]] or [[\item]], the \TeX{} syntax expects an
+optional argument and claims the next [[[]] via a [[nextgroup]]
+chain---and a [[nextgroup]] match outranks \emph{every} ordinary item,
+so [[nowebTT]] never gets to compete for the first bracket of a
+[[[[...]]]] quote there.  If the quoted text then contains a \%, the
+\TeX{} comment rule eats the closing brackets and the option region
+stays open---in one real file it swallowed 147 lines of prose and
+several chunks.
+
+We recover \emph{inside} the stolen bracket instead, where ordinary
+priority applies again: this contained match consumes the orphaned
+[[[content]]] (spanning any \%, because an item that starts earlier
+beats one that starts later), so scanning resumes exactly at the
+trailing [[]]] and the option region closes on the same line.  The
+lookahead is the safety catch: only a [[[X]]]]-shaped text---noweb
+quoting seen from inside a stolen bracket---matches, never a genuine
+\LaTeX{} [[[options]]] argument.
+
+<<recover quoting stolen by \TeX{} option arguments>>=
+" When [[...]] quoting follows a tex command taking an optional argument
+" (\begin{env}, \item, ...), the tex syntax claims the first [ as the
+" argument's opening delimiter via a nextgroup chain, which has priority
+" over any ordinary item -- and a % inside the quoting then comments out
+" the ]], leaving the option region open for the rest of the file.
+" Recover from inside the stolen bracket: consume the orphaned [content]
+" (which only exists in [X]] shapes, hence the lookahead) so the trailing
+" ] closes the option region on the same line.
+syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1 contained containedin=tex.*Opt,tex.*Label
+@
+
+\subsection{The fallback chunk region}
+\label{sec:fallback}
+
+This region is the skeleton's safety net: it matches \emph{every}
+chunk, leaves the body unhighlighted, and is outranked by the
+language-aware regions that \cref{sec:refresh} layers on top (they are
+defined later; definition order is priority).  Its shape, however, is
+exactly the shape those regions reuse, so the reasoning lives here.
+
+\begin{description}
+\item[ [[matchgroup=nowebName]] on the start:] the header line gets
+  chunk-name colours, and---the real point---contained items cannot
+  match inside [[matchgroup]] text.  The shell syntax's here-doc rule
+  matches [[@<<word]]; without the matchgroup it fired on the header
+  itself and painted the whole chunk as one unterminated here-doc
+  string.
+\item[Two end patterns:] a chunk ends at the next text chunk
+  ([[@]] plus space or newline) \emph{or} implicitly at the next chunk
+  definition---exactly the two terminators notangle accepts.  A tab
+  after [[@]] is deliberately \emph{not} an end: notangle treats that
+  line as code, and the highlighting should not diverge from the
+  tangler.
+\item[ [[me=s-1]] on both ends:] the terminator itself stays
+  unconsumed, so the following item---[[nowebStartText]] or the next
+  chunk's region---starts on that very line.  (The v1.3 code used
+  [[me=e-3]] on a two-character match and relied on Vim clamping the
+  offset; it happened to work.)
+\item[ [[keepend]]: ] included items must not push past the end match;
+  without it a multi-line string in a chunk body could swallow the
+  terminator.
+\item[ [[containedin=tex.*]]: ] a chunk header must \emph{always} start
+  a chunk, even when a runaway \TeX{} region (previous subsection) has
+  swallowed the surrounding prose.  This is safe because the \TeX{}
+  option regions lack [[keepend]], so a contained chunk region
+  legitimately obscures their end patterns---a [[]]] inside code does
+  not chop the chunk.
+\end{description}
+
+<<fallback code-chunk region>>=
+" NOWEB code chunks are defined by @<<chunk_name@>>= and ended by the next
+" "@" (not a "@@"!) in the first column of a line, or implicitly by the
+" next chunk definition.  Both ends use me=s-1 so the terminator itself is
+" left for the following item (nowebStartText or the next chunk region).
+" The header is highlighted via matchgroup, which also keeps items of an
+" included language syntax from matching inside it.  This is the fallback
+" region for chunks whose language could not be inferred: its body is
+" left unhighlighted (chunk references are still marked).  Language-aware
+" regions are layered on top of it by noweb#refresh() below, which is why
+" they take priority -- they are defined later.  nowebChunkRef is also
+" defined there, after the language includes, so that it outranks them.
+" containedin=tex.* guarantees a chunk header always starts a chunk, even
+" inside a runaway tex region (see nowebTT above); the tex regions lack
+" keepend, so a contained chunk safely obscures their end patterns.
+syntax region nowebCode
+      \ matchgroup=nowebName start=/^@<<.\{-}@>>=\s*$/
+      \ matchgroup=NONE
+      \ end=/^@\%( \|$\)/me=s-1
+      \ end=/^@<<.\{-}@>>=\s*$/me=s-1
+      \ keepend
+      \ contains=nowebChunkRef,@NoSpell
+      \ containedin=tex.*
+@
+
+\subsection{Text-chunk starts and highlight links}
+
+The [[@]] that opens a text chunk gets a marker of its own---the ends
+above left it unconsumed for exactly this item.
+
+<<mark text-chunk starts>>=
+" Here, we mark the beginning of a new text chunk.
+syntax match nowebStartText /^@\%( \|$\)/ containedin=tex.*
+@
+
+The links are plain [[hi def link]] with no guard around them.  The
+v1.2 code wrapped them in a global [[did_noweb_syntax_inits]] flag, a
+pre-Vim-6 relic with a modern cost: after [[:syntax off | syntax on]]
+the syntax file re-runs but the flag is still set, so the links were
+never restored and the noweb colours silently vanished for the rest of
+the session.  [[hi def link]] is idempotent; the guard protected
+nothing.
+
+<<default highlight links>>=
+" The default methods for highlighting. Can be overridden later.
+hi def link nowebStartText Constant
+hi def link nowebTT     Constant
+hi def link nowebTTOrphan nowebTT
+hi def link nowebName     Type
+hi def link nowebChunkRef nowebName
+@
+
+\subsection{Bootstrapping the language inference}
+
+The rest of the file hands over to \cref{sec:autoload}.  The two
+buffer variables are reset here, unconditionally: a full re-source
+(e.g.\ [[:edit]]) starts the syntax from scratch, wiping the included
+clusters, so stale bookkeeping claiming a language is already included
+would make [[contains=@nowebLang_x]] silently match nothing.  Refresh
+then runs once immediately and again after every write; the
+buffer-local [[:NowebSyncLang]] covers everything in between.
+
+<<language-inference bootstrap>>=
+let b:current_syntax = "noweb"
+
+" Infer chunk languages and build the per-language regions, then keep them
+" up to date: on every load (here), after each write, and on demand via
+" :NowebSyncLang.  A full re-source (e.g. :edit) wipes included clusters,
+" so reset the bookkeeping before the initial inference.
+let b:noweb_included = {}
+let b:noweb_lang_groups = []
+call noweb#refresh()
+
+command! -buffer NowebSyncLang call noweb#refresh()
+
+augroup nowebLangSync
+  autocmd! * <buffer>
+  autocmd BufWritePost <buffer> call noweb#refresh()
+augroup END
+@
+
+\section{Language inference}
+\label{sec:autoload}
+
+This file is a Vimscript port of the \emph{algorithm} at the core of
+noweb's \enquote{autolang} filter (from \texttt{tominted.nw}): seed
+every chunk with a language taken from a filename-like chunk name or a
+[[#!]] line, then propagate those languages along \emph{use} edges, so
+a descriptively-named chunk used by a typed root inherits the root's
+language.  Extension-only dispatch would miss most chunks in a real
+document---the whole point of noweb is that chunks are named for what
+they mean, not what file they land in.
+
+The seeding \emph{data}, however, is not ported: on Neovim the
+questions \enquote{what language is a file with this name?} and
+\enquote{what language does this shebang name?} are answered by the
+editor's own filetype database (\cref{sec:askeditor}), which is
+exactly the data we would otherwise re-encode by hand.  The small
+fixed tables that seeded versions 1.3--1.4 remain only as a fallback
+for editors without that database.
+
+The file reads data first, then helpers, then the algorithm---which
+happens to be pedagogical order as well:
+
+<<[[autoload/noweb.vim]]>>=
+<<autoload file header>>
+
+<<[[s:lexers_by_name]] table>>
+
+<<[[s:lexers_by_ext]] table>>
+
+<<[[s:interpreters]] table>>
+
+<<the [[s:CONFLICT]] sentinel>>
+
+<<[[s:filetype_match]]>>
+
+<<[[s:detect_in_scratch]]>>
+
+<<[[s:lexer_for_chunk]]>>
+
+<<[[s:shebang_lang]]>>
+
+<<[[s:re_escape]]>>
+
+<<[[s:infer_languages]]>>
+
+<<[[s:include_lang]]>>
+
+<<[[noweb#refresh]]>>
+@
+
+<<autoload file header>>=
+" autoload/noweb.vim -- per-chunk language inference for noweb sources
+"
+" Ports the algorithm of the "autolang" filter from noweb's tominted.nw:
+" every code chunk is seeded with a language from a filename-like chunk
+" name or a #! line, and those languages then propagate along @<<use@>>
+" edges (a worklist with conflict detection), so a descriptively-named
+" chunk used by a typed root inherits the root's language.  On Neovim
+" the seeds come from the editor's own filetype database
+" (vim.filetype.match); fixed tables remain as the fallback.  The result
+" drives one :syntax region per language, each including that language's
+" own syntax file on demand.
+@
+
+\subsection{Asking the editor first}
+\label{sec:askeditor}
+
+Everything this file wants to know about names and shebangs is data
+the editor already maintains, mapping filenames \emph{and} file
+contents to filetypes---and filetypes are precisely the names
+[[:syntax include]] wants.  Both Vim lineages can be asked.  Neovim
+exposes its database as a function, [[vim.filetype.match]]; Vim keeps
+the same database in autocommand form (the [[filetypedetect]] group:
+[[filetype.vim]], plus [[scripts.vim]] for shebangs), which cannot be
+called---but it can be \emph{run}, against a throwaway buffer.
+Asking the editor instead of keeping our own tables removes the
+redundancy, keeps the answers in sync with the editor across
+upgrades, and widens coverage to every language the editor can
+detect---[[x.zsh]] becomes [[zsh]], not the [[sh]] our table used to
+approximate it with.
+
+Edit-time inference may now disagree with weave-time autolang in
+corner cases (autolang asks Pygments, which calls the same chunk
+[[bash]]); that is by design, not drift: each side answers how
+\emph{its} medium highlights the chunk.
+
+The results are cached because chunk names recur on every refresh and
+the database does not change within a session.  Only when there is no
+database at all---filetype detection switched off, or a Vim too old
+to have the group---does the function answer [['']] and route every
+caller to its fallback table.
+
+<<[[s:filetype_match]]>>=
+" Ask the editor's filetype database for ARGS, e.g. {'filename': ...}
+" or {'filename': ..., 'contents': [...]}.  Returns '' when there is
+" no answer or no database to ask.
+let s:ft_cache = {}
+function! s:filetype_match(args) abort
+  let l:key = string(a:args)
+  if !has_key(s:ft_cache, l:key)
+    if has('nvim')
+      let s:ft_cache[l:key] = luaeval('vim.filetype.match(_A) or ""', a:args)
+    elseif exists('#filetypedetect#BufRead')
+      let s:ft_cache[l:key] = s:detect_in_scratch(a:args)
+    else
+      let s:ft_cache[l:key] = ''
+    endif
+  endif
+  return s:ft_cache[l:key]
+endfunction
+@
+
+On Vim the query is a small performance: create a throwaway buffer
+whose name is the candidate filename---under a session-unique
+directory that does not exist, so no real file or buffer can
+collide---give it the shebang line as contents, and fire the
+[[filetypedetect]] autocommands at it.  [[eventignore]] does the
+chaperoning.  Everything is suppressed while the buffer comes and
+goes, so no other plugin reacts to a buffer that lives for a
+millisecond; during the detection itself only [[FileType]] stays
+suppressed, because the detection must be free to assign
+[[&filetype]]---that assignment is the answer we read---but nothing
+should start loading ftplugins over it.  The cache above makes the
+cost irrelevant: one throwaway buffer per unique question per
+session.
+
+<<[[s:detect_in_scratch]]>>=
+" Vim's counterpart of vim.filetype.match: run the filetypedetect
+" autocommands against a throwaway buffer with the candidate name and
+" contents, and read the &filetype they assign.
+let s:scratch_dir = tempname()
+function! s:detect_in_scratch(args) abort
+  let l:ft = ''
+  let l:eventignore = &eventignore
+  set eventignore=all
+  try
+    silent execute 'keepalt new'
+          \ fnameescape(s:scratch_dir . '/' . get(a:args, 'filename', 'noweb-chunk'))
+    setlocal buftype=nofile noswapfile
+    if has_key(a:args, 'contents')
+      call setline(1, a:args['contents'])
+    endif
+    set eventignore=FileType
+    silent doautocmd filetypedetect BufRead
+    let l:ft = &l:filetype
+  finally
+    set eventignore=all
+    silent! bwipeout!
+    let &eventignore = l:eventignore
+  endtry
+  return l:ft
+endfunction
+@
+
+\subsection{Naming a chunk's language}
+
+The fallback tables carry the name-based seeding when the editor's
+database is unavailable: exact basenames (the Makefile family has no
+extension) and extensions.  The values are Vim syntax names, which
+double as the canonical language keys everywhere else in this file.
+
+<<[[s:lexers_by_name]] table>>=
+" Chunk name (verbatim basename) -> Vim syntax name.
+let s:lexers_by_name = {
+      \ 'Makefile': 'make', 'makefile': 'make', 'GNUmakefile': 'make',
+      \ }
+@
+
+<<[[s:lexers_by_ext]] table>>=
+" Chunk name extension -> Vim syntax name (the canonical language key).
+let s:lexers_by_ext = {
+      \ '.py': 'python', '.pyw': 'python',
+      \ '.c': 'c', '.h': 'c',
+      \ '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.C': 'cpp',
+      \ '.hpp': 'cpp', '.hh': 'cpp', '.hxx': 'cpp',
+      \ '.sh': 'sh', '.bash': 'sh', '.zsh': 'sh', '.ksh': 'sh',
+      \ '.ml': 'ocaml', '.mli': 'ocaml',
+      \ '.mk': 'make',
+      \ '.pl': 'perl', '.pm': 'perl',
+      \ '.rb': 'ruby', '.lua': 'lua', '.php': 'php',
+      \ '.js': 'javascript', '.mjs': 'javascript', '.ts': 'typescript',
+      \ '.java': 'java', '.r': 'r', '.R': 'r',
+      \ '.vim': 'vim', '.awk': 'awk', '.sed': 'sed',
+      \ '.hs': 'haskell', '.go': 'go', '.rs': 'rust',
+      \ '.sql': 'sql', '.html': 'html', '.css': 'css',
+      \ '.tex': 'tex', '.yml': 'yaml', '.yaml': 'yaml',
+      \ }
+@
+
+The lookup mirrors autolang's [[lexer_for_chunk]]: a chunk name may
+use noweb's [[[[...]]]] quoting and may contain directory separators,
+and only the basename decides---[[@<<src/util.py@>>]] is Python no
+matter where it tangles to.  Note the quote-stripping must come
+first; [[[[Makefile]]]] should be looked up as a basename.  The
+basename, not the full name, also goes to the editor's database: its
+path-based patterns (matching e.g.\ files under [[etc/]]) make no
+sense for chunk names.
+
+<<[[s:lexer_for_chunk]]>>=
+" Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
+" The name may use noweb's [[...]] quoting and may contain directory
+" separators; only the basename decides (mirrors lexer_for_chunk).
+function! s:lexer_for_chunk(name) abort
+  let l:name = a:name
+  if l:name =~# '^\[\[.*\]\]$'
+    let l:name = l:name[2:-3]
+  endif
+  let l:base = matchstr(l:name, '[^/]*$')
+  let l:ft = s:filetype_match({'filename': l:base})
+  if l:ft !=# ''
+    return l:ft
+  endif
+  <<look [[l:base]] up in the fallback tables>>
+endfunction
+@
+
+<<look [[l:base]] up in the fallback tables>>=
+if has_key(s:lexers_by_name, l:base)
+  return s:lexers_by_name[l:base]
+endif
+let l:dot = strridx(l:base, '.')
+if l:dot >= 0
+  let l:ext = strpart(l:base, l:dot)
+  if has_key(s:lexers_by_ext, l:ext)
+    return s:lexers_by_ext[l:ext]
+  endif
+endif
+return ''
+@
+
+\subsection{Shebangs}
+
+A chunk whose name says nothing may still open with [[#!/bin/sh]].
+On Neovim the shebang goes to the editor's database as file
+\emph{contents}, together with a neutral, extensionless dummy
+filename---contents alone make Neovim skip parts of its detection
+(a bare [[#!/bin/bash]] goes unrecognised), while an unknown filename
+routes the query through the full machinery, shebang analysis
+included.
+
+The fallback interpreter table maps interpreter basenames to syntax
+names, and its parser follows the [[env]] indirection because
+[[#!/usr/bin/env python3]] is the portable spelling---the interesting
+token is the argument, not [[env]] itself.
+
+<<[[s:interpreters]] table>>=
+" Interpreter basename from a #! line -> Vim syntax name.
+let s:interpreters = {
+      \ 'python': 'python', 'python2': 'python', 'python3': 'python',
+      \ 'sh': 'sh', 'bash': 'sh', 'dash': 'sh', 'ksh': 'sh', 'zsh': 'sh',
+      \ 'perl': 'perl', 'ruby': 'ruby', 'lua': 'lua', 'php': 'php',
+      \ 'node': 'javascript', 'nodejs': 'javascript',
+      \ 'awk': 'awk', 'gawk': 'awk', 'sed': 'sed', 'Rscript': 'r',
+      \ }
+@
+
+<<[[s:shebang_lang]]>>=
+" Return the language a #! line names, or '' if it is not a #! line.
+function! s:shebang_lang(line) abort
+  if a:line !~# '^#!'
+    return ''
+  endif
+  let l:ft = s:filetype_match({'filename': 'noweb-chunk', 'contents': [a:line]})
+  if l:ft !=# ''
+    return l:ft
+  endif
+  <<parse the shebang with the fallback table>>
+endfunction
+@
+
+<<parse the shebang with the fallback table>>=
+" Follow the env indirection: the interesting token is env's argument.
+let l:toks = split(a:line[2:])
+if empty(l:toks)
+  return ''
+endif
+let l:interp = matchstr(l:toks[0], '[^/]*$')
+if l:interp ==# 'env' && len(l:toks) > 1
+  let l:interp = matchstr(l:toks[1], '[^/]*$')
+endif
+return get(s:interpreters, l:interp, '')
+@
+
+\subsection{Escaping chunk names into patterns}
+
+The region builder in \cref{sec:refresh} splices chunk names into a
+magic-mode [[/.../]] pattern, so everything magic there must be
+escaped---including the backslash first, so the escapes themselves do
+not get re-escaped.
+
+<<[[s:re_escape]]>>=
+" Escape a chunk name for literal use inside a /.../ (magic) pattern.
+function! s:re_escape(name) abort
+  return escape(a:name, '\/.*$^~[]')
+endfunction
+@
+
+\subsection{Inferring the languages}
+\label{sec:infer}
+
+The inference is one buffer scan followed by a propagation pass over
+the collected graph:
+
+<<[[s:infer_languages]]>>=
+" Scan the buffer and return {chunk name -> Vim syntax name}.
+function! s:infer_languages() abort
+  <<scan chunks for language seeds and uses>>
+  <<propagate languages along use edges>>
+  return l:langs
+endfunction
+@
+
+\subsubsection{The scan}
+
+The scanner is a small state machine over the buffer lines: a chunk
+header enters code mode, a text-chunk marker leaves it, and everything
+in between belongs to the current chunk.  The header and terminator
+patterns are the same ones the syntax regions use---inference and
+highlighting must agree on what a chunk is.
+
+The state is a handful of variables serving two different masters.
+Two of them are the scan's \emph{products}: [[l:langs]] maps chunk
+names to inferred languages and is what the function returns, and
+[[l:uses]] is the graph the propagation pass will walk---for each
+chunk, the set of chunk names its body references.  One is a
+\emph{protection marker}: [[l:explicit]] records which entries of
+[[l:langs]] came from the chunk's own name or shebang, so that
+propagation later refuses to override an author-stated language with
+an inherited one.  The rest is the state machine proper:
+[[l:current]] and [[l:in_code]] say which chunk we are inside, if
+any, and [[l:body_started]] remembers whether a non-blank body line
+has been seen yet---only the first one may carry a shebang.
+
+<<scan chunks for language seeds and uses>>=
+let l:lines = getline(1, '$')
+let l:uses = {}
+let l:langs = {}
+let l:explicit = {}
+let l:current = ''
+let l:in_code = 0
+let l:body_started = 0
+for l:line in l:lines
+  if l:line =~# '^@<<.\{-}@>>=\s*$'
+    <<open a chunk and seed its language from its name>>
+  elseif l:in_code && l:line =~# '^@\($\| \)'
+    let l:in_code = 0
+    let l:current = ''
+  elseif l:in_code && l:current !=# ''
+    <<seed from a shebang on the first body line>>
+    <<collect chunk uses on the line>>
+  endif
+endfor
+@
+
+A name-derived language is recorded as \emph{explicit}: the name is
+the author's own statement of intent, so neither a later shebang nor
+propagation may override it.
+
+<<open a chunk and seed its language from its name>>=
+let l:current = matchstr(l:line, '^@<<\zs.\{-}\ze@>>=\s*$')
+let l:in_code = 1
+let l:body_started = 0
+if !has_key(l:uses, l:current)
+  let l:uses[l:current] = {}
+endif
+if !has_key(l:explicit, l:current)
+  let l:lx = s:lexer_for_chunk(l:current)
+  if l:lx !=# ''
+    let l:langs[l:current] = l:lx
+    let l:explicit[l:current] = 1
+  endif
+endif
+@
+
+Only the first \emph{non-blank} body line can be a shebang---that is
+where a kernel would look, modulo the blank lines notangle strips
+between concatenated chunk definitions.
+
+<<seed from a shebang on the first body line>>=
+if !l:body_started && l:line !~# '^\s*$'
+  let l:body_started = 1
+  if !has_key(l:explicit, l:current)
+    let l:sb = s:shebang_lang(l:line)
+    if l:sb !=# ''
+      let l:langs[l:current] = l:sb
+      let l:explicit[l:current] = 1
+    endif
+  endif
+endif
+@
+
+Uses are collected from every code line.  A [[@<<...@>>]] immediately
+followed by [[=]] is a definition, not a use---continued definitions
+of the same chunk would otherwise register the chunk as using itself,
+which is harmless for propagation but pollutes the graph.
+
+<<collect chunk uses on the line>>=
+" Collect @<<use@>> references (a @<< ... @>> not followed by '=').
+let l:start = 0
+while 1
+  let l:mp = matchstrpos(l:line, '@<<.\{-}@>>', l:start)
+  if l:mp[1] < 0
+    break
+  endif
+  let l:mend = l:mp[2]
+  if l:mend < len(l:line) && l:line[l:mend] ==# '='
+    let l:start = l:mend
+    continue
+  endif
+  let l:uses[l:current][l:mp[0][2:-3]] = 1
+  let l:start = l:mend
+endwhile
+@
+
+\subsubsection{Propagation}
+
+Languages flow from seeded chunks to the chunks they use, worklist
+style.  Two rules keep the result trustworthy.  Explicitly-typed
+chunks are immune---their name or shebang outranks any inheritance.
+And a chunk reachable from two \emph{differently}-typed parents is
+marked conflicted rather than first-come-first-served: a wrong
+highlight is worse than none, and conflicted chunks simply keep the
+plain fallback region.
+
+<<propagate languages along use edges>>=
+" Propagate languages along use edges (worklist with conflict marking).
+let l:worklist = keys(l:langs)
+while !empty(l:worklist)
+  let l:parent = remove(l:worklist, -1)
+  let l:lang = l:langs[l:parent]
+  if l:lang ==# s:CONFLICT
+    continue
+  endif
+  for l:child in keys(get(l:uses, l:parent, {}))
+    if has_key(l:explicit, l:child) || s:lexer_for_chunk(l:child) !=# ''
+      continue
+    endif
+    if !has_key(l:langs, l:child)
+      let l:langs[l:child] = l:lang
+      call add(l:worklist, l:child)
+    elseif l:langs[l:child] !=# s:CONFLICT && l:langs[l:child] !=# l:lang
+      let l:langs[l:child] = s:CONFLICT
+    endif
+  endfor
+endwhile
+@
+
+The conflict marker only needs to be impossible as a real syntax
+name; the NUL bytes guarantee that.
+
+<<the [[s:CONFLICT]] sentinel>>=
+let s:CONFLICT = "\x00conflict\x00"
+@
+
+\subsection{Including a language's syntax}
+\label{sec:include}
+
+[[:syntax include]] reads a syntax file into a cluster instead of the
+buffer's top level.  The dance around [[b:current_syntax]] is forced
+on us: syntax files begin with the guard we ourselves use---bail out
+if [[b:current_syntax]] is set---so the variable must be unset for the
+include to do anything, and restored afterwards so the buffer still
+knows its own syntax is loaded.  Absence of a syntax file is cached as
+an empty cluster name; there is no point globbing the runtime path for
+[[fortran.vim]] on every write.
+
+<<[[s:include_lang]]>>=
+" Include LANG's syntax under cluster @nowebLang_<lang>, once per buffer.
+" Returns the cluster name, or '' if Vim ships no such syntax.
+function! s:include_lang(lang) abort
+  let l:cluster = 'nowebLang_' . substitute(a:lang, '[^A-Za-z0-9]', '_', 'g')
+  if has_key(b:noweb_included, a:lang)
+    return b:noweb_included[a:lang]
+  endif
+  if empty(globpath(&runtimepath, 'syntax/' . a:lang . '.vim'))
+    let b:noweb_included[a:lang] = ''
+    return ''
+  endif
+  let l:saved = exists('b:current_syntax') ? b:current_syntax : ''
+  if l:saved !=# ''
+    unlet b:current_syntax
+  endif
+  execute 'silent! syntax include @' . l:cluster . ' syntax/' . a:lang . '.vim'
+  if l:saved !=# ''
+    let b:current_syntax = l:saved
+  elseif exists('b:current_syntax')
+    unlet b:current_syntax
+  endif
+  let b:noweb_included[a:lang] = l:cluster
+  return l:cluster
+endfunction
+@
+
+\subsection{Rebuilding the regions}
+\label{sec:refresh}
+
+[[noweb#refresh()]] is the entry point the syntax file calls; it
+re-infers everything and rebuilds all per-language items.  Its five
+phases run in a fixed order, and the last two exist purely because of
+the invariants of \cref{sec:overview}: the chunk-reference item must
+be defined after every include, and the sync policy must be restated
+after every include.
+
+<<[[noweb#refresh]]>>=
+" Re-infer chunk languages and (re)build the per-language syntax regions.
+function! noweb#refresh() abort
+  <<reset per-buffer region state>>
+
+  <<bucket chunk names by language>>
+
+  <<build one region per language>>
+
+  <<redefine [[nowebChunkRef]] after the includes>>
+
+  <<sync from the start>>
+endfunction
+@
+
+The reset clears the previous refresh's regions by group name.
+[[syntax clear]] on a group removes its patterns but keeps the group
+id valid, so items already referring to the group do not break.
+
+<<reset per-buffer region state>>=
+if !exists('b:noweb_included')
+  let b:noweb_included = {}
+endif
+if !exists('b:noweb_lang_groups')
+  let b:noweb_lang_groups = []
+endif
+for l:grp in b:noweb_lang_groups
+  execute 'silent! syntax clear ' . l:grp
+endfor
+let b:noweb_lang_groups = []
+@
+
+Regions are built per \emph{language}, not per chunk---a document with
+forty Python chunks needs one region with forty start alternatives,
+not forty regions.  Conflicted chunks are dropped here (they keep the
+fallback), and so are two languages by name: [[text]] means
+\enquote{explicitly no highlighting}, and [[tex]] is skipped because
+the buffer's outer syntax already \emph{is} \TeX{}---re-including it
+as a cluster would load the whole \TeX{} syntax a second time and
+re-run its [[syn sync]] and [[spell]] setup mid-refresh.
+
+<<bucket chunk names by language>>=
+let l:langs = s:infer_languages()
+let l:bylang = {}
+for [l:name, l:lang] in items(l:langs)
+  " 'tex' is skipped: the buffer's outer syntax already is tex, and
+  " re-including it as a cluster re-runs its sync/spell setup mid-refresh.
+  if l:lang ==# s:CONFLICT || l:lang ==# 'text' || l:lang ==# 'tex'
+    continue
+  endif
+  let l:bylang[l:lang] = get(l:bylang, l:lang, []) + [l:name]
+endfor
+@
+
+Each region is the fallback region's shape (\cref{sec:overview}
+explains [[matchgroup]], the two [[me=s-1]] ends and [[keepend]]) with
+the language's cluster added to [[contains]].  Being defined after
+the fallback, these win the header-line tie against it.
+
+<<build one region per language>>=
+let l:i = 0
+for [l:lang, l:names] in items(l:bylang)
+  let l:cluster = s:include_lang(l:lang)
+  if l:cluster ==# ''
+    continue
+  endif
+  let l:i += 1
+  let l:grp = 'nowebCodeLang' . l:i
+  let l:alt = join(map(copy(l:names), 's:re_escape(v:val)'), '\|')
+  " matchgroup= keeps included items (e.g. sh.vim's here-doc rule, which
+  " matches @<<word) from ever firing on the header line; me=s-1 on both
+  " ends leaves the terminator unconsumed, so a following chunk header
+  " both ends this region and starts the next one.
+  execute 'syntax region ' . l:grp
+        \ . ' matchgroup=nowebName start=/^@<<\%(' . l:alt . '\)@>>=\s*$/'
+        \ . ' matchgroup=NONE'
+        \ . ' end=/^@\%( \|$\)/me=s-1'
+        \ . ' end=/^@<<.\{-}@>>=\s*$/me=s-1'
+        \ . ' keepend'
+        \ . ' contains=@' . l:cluster . ',nowebChunkRef,@NoSpell'
+        \ . ' containedin=tex.*'
+  call add(b:noweb_lang_groups, l:grp)
+endfor
+@
+
+Chunk references inside code bodies are the one noweb markup that must
+survive \emph{inside} the included languages---and the shell syntax's
+here-doc rule matches the same [[@<<]] text.  Winning that tie is why
+this item is (re)defined here, after every include, rather than once
+in the syntax file.  The pattern requires non-space first and last
+name characters, so a real redirected here-doc like
+[[cat @<<EOF @>> log]] is left to the shell syntax.
+
+<<redefine [[nowebChunkRef]] after the includes>>=
+" Must be (re)defined after every :syntax include above: at the same
+" start position the last-defined item wins (:h syn-priority), which is
+" what lets chunk refs beat e.g. shHereDoc's @<<-pattern inside sh chunks.
+" First/last name chars must be non-space, so `cat @<<EOF @>> log` stays a
+" here-doc.  syntax clear keeps the group id (contains= refs stay valid)
+" while preventing pattern accumulation across refreshes.
+silent! syntax clear nowebChunkRef
+syntax match nowebChunkRef /@<<\%([^ ]\|[^ ].\{-}[^ ]\)@>>/ contained contains=nowebTT
+@
+
+Finally, the sync policy.  This line is the single biggest reliability
+fix in v1.4: every included syntax file may install [[syn sync]] rules,
+and those are \emph{buffer-global}---the Python syntax declares that a
+line matching [[^def]] is top level, the make syntax declares that
+nearly \emph{every} line is.  Scrolling then re-syncs the buffer
+wrongly and chunks lose their highlighting mid-file, depending on
+which language happened to be included last.  We discard all imported
+sync rules and parse from the top of the file; noweb sources are small
+enough that exactness costs nothing.
+
+<<sync from the start>>=
+" Included syntax files install buffer-global sync rules (pythonSync
+" grouphere on ^def, make's groupthere on ^[^\t#], small minlines) that
+" re-sync this buffer wrongly while scrolling.  Drop them and parse from
+" the top; noweb sources are small.
+syntax sync clear
+syntax sync fromstart
+@
+
+\section{Building and maintaining}
+\label{sec:building}
+
+Editing this file follows the usual literate loop: edit
+[[vim-noweb.nw]], run [[make]], and commit the [[.nw]] together with
+the re-tangled files.  [[make check]] enforces the two things worth
+enforcing: [[noroots]] must report exactly the three root chunks (an
+extra root is a typo'd chunk reference), and the tangled files must
+match the working tree.
+
+The license is MIT, tangled from here so that the title page can
+show the same text the repository ships.  Versions 1.0--1.2 carried no
+license statement of their own; the credit to their authors lives in
+the title page's footnote and in the syntax file's header.
+
+<<[[LICENSE]]>>=
+MIT License
+
+Copyright (c) 2008 Xun Gong, Dirk Baechle
+Copyright (c) 2026 Daniel Bosk
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+@
+
+Two conventions keep the tangle byte-exact:
+
+\begin{description}
+\item[Escaping:] the plugin's own code is full of literal [[<<]] and
+  [[>>]]---in the very patterns that match noweb markup.  Inside code
+  chunks these are written [[@<<]] and [[@>>]], \emph{uniformly}, even
+  where an unpaired bracket would happen to tangle correctly: a later
+  edit adding a second bracket on the same line would silently pair
+  them into a chunk reference.  (The nastiest case is the comment
+  mentioning [[cat @<<EOF @>> log]]: unescaped, [[@<<EOF @>>]] is a
+  well-formed reference to a chunk named \enquote{[[EOF]] }.)
+\item[Tabs:] the header comment block of the syntax file contains
+  tabs, and notangle expands tabs by default; [[-t8]] preserves them.
+\end{description}
+
+The Makefile is a plain committed file---it cannot tangle itself.  The
+tangled [[.vim]] files are committed too, so the plugin works from a
+bare clone; only the woven [[.tex]]/[[.pdf]] are ignored.  The weave
+uses [[-autolang]] and the minted-based [[tominted]] filter, so the
+chunks of this document are themselves highlighted as Vim script.
+
+\end{document}
