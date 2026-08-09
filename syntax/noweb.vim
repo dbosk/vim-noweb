@@ -1,13 +1,15 @@
-
 " Vim syntax file
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
-" Maintainer:		Daniel Bosk <daniel@bosk.se>
-" Date:			2026-08-07
+" Maintainer:		Daniel Bosk <dbosk@kth.se>
+" Date:			2026-08-09
 " Version:		1.4
-" Derived from: 	cweb.vim by Andreas Scherer
+" Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
+"
+" Versions 1.3 and 1.4 together amount to a complete rewrite:
+" virtually no code from v1.2 or earlier remains.
 "
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
@@ -121,5 +123,3 @@ augroup nowebLangSync
   autocmd! * <buffer>
   autocmd BufWritePost <buffer> call noweb#refresh()
 augroup END
-
-" vim: ts=8

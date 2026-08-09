@@ -9,11 +9,11 @@
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage[minted]{noweb}
-\noweboptions{longxref,breakcode}
-\setminted{autogobble,breaklines}
+\noweboptions{longxref,breakcode,shift}
+\setminted{autogobble}
 \usepackage{csquotes}
 \usepackage{hyperref}
-\usepackage{cleveref}
+\usepackage[capitalise]{cleveref}
 
 % [[...]] quotes in section headings become hyperlinked identifiers when
 % noweave's -index is active; hyperref breaks when those links expand in
@@ -69,6 +69,10 @@ The plugin's lineage, version by version:
   rationale for those defences is the bulk of this document.
 \end{description}
 
+Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
+no code from v1.2 or earlier remains, only the file layout and the
+group names.
+
 Everything in this repository tangles from this file.  The plugin's
 three files are the root chunks, named after their paths in the
 plugin tree:
@@ -88,14 +92,12 @@ bare [[git clone]]; plugin managers do not run notangle.
 itself must follow (notably: every literal [[<<]] or [[>>]] inside a
 code chunk is escaped as [[@<<]] and [[@>>]]).
 
-One constraint shaped this first literate conversion: the tangled
-files must reproduce the previous hand-written files byte for byte, so
-that [[git diff]] proves the conversion changed nothing.  The comments
-inside the code chunks therefore remain exactly as they were; the
-prose around them expands on them rather than replacing them.
-Slimming the in-file comments down is a possible later change---one
-that would visibly alter the tangled output and so deserves its own
-commit.
+One constraint shaped the initial literate conversion: the tangled
+files had to reproduce the then hand-written files byte for byte, so
+that [[git diff]] could prove the conversion changed nothing.  That
+constraint served its purpose and has been lifted; this document is
+now the only source, and the code chunks---comments included---evolve
+here.
 
 \section{Overview}
 \label{sec:overview}
@@ -169,21 +171,18 @@ autocmd BufRead,BufNewFile *.nw setfiletype noweb
 The file reads top to bottom in the order Vim executes it: guard,
 \TeX{} base, prose-level markup, the fallback chunk region, highlight
 links, and finally the hand-over to the language-inference machinery.
-The leading blank line is historical---it is kept so that the tangled
-file stays byte-identical to its hand-written ancestor.
 
 <<[[syntax/noweb.vim]]>>=
-
 <<syntax file header>>
 
 <<bail out if a syntax is already active>>
 
 
-<<load the TeX base syntax>>
+<<load the \TeX{} base syntax>>
 
 <<quoting and chunk-name markup>>
 
-<<recover quoting stolen by tex option arguments>>
+<<recover quoting stolen by \TeX{} option arguments>>
 
 <<fallback code-chunk region>>
 
@@ -203,12 +202,15 @@ ignores it but archaeologists should not have to run [[git log]].
 " Vim syntax file
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
-" Maintainer:		Daniel Bosk <daniel@bosk.se>
-" Date:			2026-08-07
+" Maintainer:		Daniel Bosk <dbosk@kth.se>
+" Date:			2026-08-09
 " Version:		1.4
-" Derived from: 	cweb.vim by Andreas Scherer
+" Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
+"
+" Versions 1.3 and 1.4 together amount to a complete rewrite:
+" virtually no code from v1.2 or earlier remains.
 "
 " v1.4: Make highlighting reliable: sync from start (included language
 "       syntaxes used to hijack the buffer's sync rules), matchgroup on
@@ -264,7 +266,7 @@ matters: [[tex.vim]] sets [[b:current_syntax]], and if we left it set,
 our own guard-style checks further down the runtime path would think
 the buffer already done; we are not finished defining the syntax yet.
 
-<<load the TeX base syntax>>=
+<<load the \TeX{} base syntax>>=
 " Like in CWEB, a NOWEB source file is treated as a TeX file
 " including code chunks in between.
 if version < 600
@@ -282,11 +284,11 @@ Noweb prose quotes code as [[[[...]]]] and may mention chunks as
 [[@<<name@>>]]; both get their own items.  Two details are load-bearing:
 
 \begin{description}
-\item[[[oneline]]:] an unbalanced [[[[]] in prose used to open a
+\item[ [[oneline]]: ] an unbalanced [[[[]] in prose used to open a
   region that ran to the end of the file and painted everything after
   it as [[Constant]].  Noweb's quoting is one-line in practice, so
   bounding the item costs nothing and removes the failure mode.
-\item[[[containedin=tex.*]]:] these items are top-level, but \TeX{}
+\item[ [[containedin=tex.*]]: ] these items are top-level, but \TeX{}
   regions opened in prose (optional arguments, groups, math) would
   otherwise hide the markup inside them.  Being injectable into every
   [[tex]]-prefixed group keeps the markup visible wherever prose ended
@@ -325,7 +327,7 @@ lookahead is the safety catch: only a [[[X]]]]-shaped text---noweb
 quoting seen from inside a stolen bracket---matches, never a genuine
 \LaTeX{} [[[options]]] argument.
 
-<<recover quoting stolen by tex option arguments>>=
+<<recover quoting stolen by \TeX{} option arguments>>=
 " When [[...]] quoting follows a tex command taking an optional argument
 " (\begin{env}, \item, ...), the tex syntax claims the first [ as the
 " argument's opening delimiter via a nextgroup chain, which has priority
@@ -347,7 +349,7 @@ defined later; definition order is priority).  Its shape, however, is
 exactly the shape those regions reuse, so the reasoning lives here.
 
 \begin{description}
-\item[[[matchgroup=nowebName]] on the start:] the header line gets
+\item[ [[matchgroup=nowebName]] on the start:] the header line gets
   chunk-name colours, and---the real point---contained items cannot
   match inside [[matchgroup]] text.  The shell syntax's here-doc rule
   matches [[@<<word]]; without the matchgroup it fired on the header
@@ -359,15 +361,15 @@ exactly the shape those regions reuse, so the reasoning lives here.
   after [[@]] is deliberately \emph{not} an end: notangle treats that
   line as code, and the highlighting should not diverge from the
   tangler.
-\item[[[me=s-1]] on both ends:] the terminator itself stays
+\item[ [[me=s-1]] on both ends:] the terminator itself stays
   unconsumed, so the following item---[[nowebStartText]] or the next
   chunk's region---starts on that very line.  (The v1.3 code used
   [[me=e-3]] on a two-character match and relied on Vim clamping the
   offset; it happened to work.)
-\item[[[keepend]]:] included items must not push past the end match;
+\item[ [[keepend]]: ] included items must not push past the end match;
   without it a multi-line string in a chunk body could swallow the
   terminator.
-\item[[[containedin=tex.*]]:] a chunk header must \emph{always} start
+\item[ [[containedin=tex.*]]: ] a chunk header must \emph{always} start
   a chunk, even when a runaway \TeX{} region (previous subsection) has
   swallowed the surrounding prose.  This is safe because the \TeX{}
   option regions lack [[keepend]], so a contained chunk region
@@ -454,8 +456,6 @@ augroup nowebLangSync
   autocmd! * <buffer>
   autocmd BufWritePost <buffer> call noweb#refresh()
 augroup END
-
-" vim: ts=8
 @
 
 \section{Language inference}
@@ -647,6 +647,19 @@ header enters code mode, a text-chunk marker leaves it, and everything
 in between belongs to the current chunk.  The header and terminator
 patterns are the same ones the syntax regions use---inference and
 highlighting must agree on what a chunk is.
+
+The state is a handful of variables serving two different masters.
+Two of them are the scan's \emph{products}: [[l:langs]] maps chunk
+names to inferred languages and is what the function returns, and
+[[l:uses]] is the graph the propagation pass will walk---for each
+chunk, the set of chunk names its body references.  One is a
+\emph{protection marker}: [[l:explicit]] records which entries of
+[[l:langs]] came from the chunk's own name or shebang, so that
+propagation later refuses to override an author-stated language with
+an inherited one.  The rest is the state machine proper:
+[[l:current]] and [[l:in_code]] say which chunk we are inside, if
+any, and [[l:body_started]] remembers whether a non-blank body line
+has been seen yet---only the first one may carry a shebang.
 
 <<scan chunks for language seeds and uses>>=
 let l:lines = getline(1, '$')
