@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.6
+" Version:		1.6.1
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,11 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
+"       YCM snapshots its options at VimEnter, so the ftplugin was
+"       too late for files opened mid-session.  Order candidates by
+"       context (undefined names first when defining) and memoize
+"       the occurrence scan on b:changedtick.
 " v1.6: Editing support: chunk names complete through the buffer's
 "       omnifunc (picked up by YCM and friends), definitions resolve
 "       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c

@@ -30,10 +30,13 @@ refreshes it on demand.
 
 Chunk names complete after `<<`: `<C-x><C-o>` in plain Vim, and
 automatically with YCM (the plugin registers the `<<` trigger for
-you; other completion frameworks pick the same function up through
-their omnifunc bridges).  Completion closes the `>>` unless it is
+you at startup; other completion frameworks pick the same function
+up through their omnifunc bridges).  Completion always reflects the
+live buffer — no write needed.  It closes the `>>` unless it is
 already there, and the menu marks referenced-but-undefined chunks —
-handy for spotting typos.
+handy for spotting typos.  At a definition position (the `<<` opens
+the line) the not-yet-defined names sort first, matching the
+use-first-define-later workflow.
 
 Chunk definitions resolve as tags: `<C-]>` on a reference jumps to
 the definition, `:tnext` steps through the appends (a chunk defined
@@ -48,8 +51,8 @@ maps to keys of your own.
 ## Hacking
 
 The source of truth is `vim-noweb.nw` — a literate program from which
-everything under `syntax/`, `autoload/`, `ftdetect/` and `ftplugin/`
-tangles.  Do
+everything under `syntax/`, `autoload/`, `ftdetect/`, `ftplugin/`
+and `plugin/` tangles.  Do
 not edit the `.vim` files directly; edit the `.nw`, run `make`, and
 commit the `.nw` together with the re-tangled `.vim` files.  `make
 check` must pass: it verifies the root chunks and that the tangled
