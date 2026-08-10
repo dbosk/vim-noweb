@@ -51,13 +51,16 @@ local function typed_roots(nwbuf)
   return roots
 end
 
-local function tangle(nwbuf, root, leader)
+local function tangle(nwbuf, root, cfg)
   local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
-  local res = vim.system({
-    'notangle', '-t8',
-    '-filter', "linemark -c '" .. leader .. "'",
+  local argv = { 'notangle' }
+  vim.list_extend(argv, cfg.tangle or {})
+  vim.list_extend(argv, {
+    '-filter', "linemark -c '" .. cfg.leader .. "'",
     '-R' .. root,
-  }, { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(5000)
+  })
+  local res = vim.system(argv,
+    { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(5000)
   if not res or res.code ~= 0 then
     return nil
   end
@@ -177,7 +180,7 @@ function M.sync(nwbuf)
     end
   end
   for root, info in pairs(roots) do
-    local lines = tangle(nwbuf, root, info.cfg.leader)
+    local lines = tangle(nwbuf, root, info.cfg)
     if lines then
       local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
       sh.src, sh.fwd, sh.marker = parse_maps(lines, info.cfg.leader)
@@ -435,7 +438,8 @@ function M.make(cmd)
   local nwfile = vim.api.nvim_buf_get_name(nwbuf)
   local tmp = vim.fn.tempname() .. (sh.root:match('%.%w+$') or '')
   local tangle = vim.system({ 'sh', '-c', string.format(
-    'notangle -t8 -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    'notangle %s -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    table.concat(sh.cfg.tangle or {}, ' '),
     sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
   if tangle.code ~= 0 then
     vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
