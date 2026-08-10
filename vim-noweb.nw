@@ -548,6 +548,8 @@ happens to be pedagogical order as well:
 
 <<the [[s:DEF]] and [[s:REF]] patterns>>
 
+<<the route between the omnifunc's two calls>>
+
 <<[[s:refs_on_line]]>>
 
 <<[[s:chunk_occurrences]]>>
@@ -563,6 +565,8 @@ happens to be pedagogical order as well:
 <<[[noweb#refs]]>>
 
 <<[[noweb#occurrences]] and [[noweb#languages]] accessors>>
+
+<<[[noweb#hover]] and [[noweb#definition]]>>
 @
 
 <<autoload file header>>=
@@ -1186,7 +1190,11 @@ let b:did_ftplugin = 1
 
 <<the occurrence maps and the [[:NowebRefs]] command>>
 
+<<the hover and definition maps>>
+
 <<start the shadow machinery>>
+
+<<initialize VimTeX for the prose>>
 @
 
 [[b:undo_ftplugin]] is the ftplugin counterpart of the syntax file's
@@ -1282,12 +1290,17 @@ let g:loaded_noweb = 1
 @
 
 <<register the chunk-reference trigger with YCM>>=
-" YCM fires the omnifunc on a per-filetype trigger sequence and has no
-" default for noweb; register @<< unless the user chose their own.
+" YCM fires the omnifunc on per-filetype trigger sequences and has no
+" default for noweb; register ours unless the user chose their own.
 " This must run before VimEnter: YCM reads the option once, at startup.
+" @<< opens a chunk reference, . fires the language servers behind the
+" shadow tangles, and VimTeX's own trigger regex covers the prose
+" (accessing the autoload variable loads it; silent! tolerates a
+" missing VimTeX).
 let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
 if !has_key(g:ycm_semantic_triggers, 'noweb')
-  let g:ycm_semantic_triggers.noweb = ['@<<']
+  let g:ycm_semantic_triggers.noweb = ['@<<', '.']
+  silent! let g:ycm_semantic_triggers.noweb += [g:vimtex#re#youcompleteme]
 endif
 @
 
@@ -1591,18 +1604,13 @@ all---an identifier-based engine can never see past a space, which
 is precisely why YCM's default identifier collector is no help for
 chunk names and the omnifunc route is worth a section of its own.
 
-Completion begins right after the last unescaped [[@<<]] before the
-cursor.  If a [[>]] already intervenes, the reference is closed and
-we are past it: returning $-3$ cancels quietly instead of beeping.
-
-<<find the start of the chunk name being completed>>=
-let l:before = strpart(getline('.'), 0, col('.') - 1)
-let l:start = matchend(l:before, '.*@\@1<!@<<')
-if l:start < 0 || stridx(l:before, '>', l:start) >= 0
-  return -3
-endif
-return l:start
-@
+Chunk-name completion begins right after the last unescaped [[@<<]]
+before the cursor, provided no [[>]] intervenes (then the reference
+is closed and we are past it).  Since v1.7 that is only the first of
+three completion \emph{routes} the omnifunc serves---the other two
+hand the request to a language server or to VimTeX
+(\cref{sec:router})---so the test moved into the router; this
+subsection owns the chunk-name route only.
 
 The candidates are every known chunk name---defined ones and
 referenced-but-undefined ones alike.  Offering the undefined ones is
@@ -1650,12 +1658,15 @@ return l:defining ? l:undefined + l:defined : l:defined + l:undefined
 @
 
 <<[[noweb#complete]]>>=
-" Omnifunc completing chunk names after @<< (:h complete-functions).
+" Omnifunc routing by context (:h complete-functions): chunk names
+" after @<<, the shadow's language server inside a code chunk,
+" VimTeX in prose.  See the routing chunks in the language-
+" intelligence section.
 function! noweb#complete(findstart, base) abort
   if a:findstart
-    <<find the start of the chunk name being completed>>
+    <<route the completion and find its start>>
   endif
-  <<collect the matching chunk names>>
+  <<produce the candidates for the routed target>>
 endfunction
 @
 
@@ -1884,6 +1895,8 @@ local state = {}
 <<shadow: sync>>
 
 <<shadow: locate a source position in a shadow>>
+
+<<shadow: LSP queries at the cursor>>
 
 <<shadow: setup>>
 
@@ -2190,6 +2203,278 @@ function M.setup(nwbuf)
   })
   M.sync(nwbuf)
 end
+@
+
+\subsection{Queries against the shadow}
+\label{sec:shadowqueries}
+
+The three interactive queries---completion, hover, definition---all
+follow the same shape: map the cursor position into the shadow
+(line through [[fwd]], column shifted by the splice indent), send
+the LSP request \emph{synchronously} against the shadow buffer, and
+map the answer back.  Synchronous is the right call here: an
+omnifunc must return its candidates in-call, and a warm language
+server answers in milliseconds.  (Positions use byte columns; LSP
+counts UTF-16 units, so heavily non-ASCII lines can be off within
+the line---a documented approximation, not worth the encoding dance
+until it bites.)
+
+Completion converts LSP items to omnifunc dictionaries---the
+inserted [[word]], the displayed [[abbr]], the item kind in
+[[menu]], documentation in [[info]]---and filters by the typed
+prefix, since a server returns everything visible at the position.
+
+<<shadow: LSP queries at the cursor>>=
+local function cursor_params(nwbuf)
+  local lnum, col = unpack(vim.api.nvim_win_get_cursor(0))
+  local sh, t, delta = M.locate(nwbuf, lnum)
+  if not sh or #vim.lsp.get_clients({ bufnr = sh.buf }) == 0 then
+    return nil
+  end
+  return sh, {
+    textDocument = { uri = vim.uri_from_bufnr(sh.buf) },
+    position = { line = t - 1, character = col + delta },
+  }
+end
+
+function M.complete(base)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if not sh then
+    return {}
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/completion', params, 3000)
+  local items = {}
+  for _, res in pairs(results or {}) do
+    for _, it in ipairs((res.result and (res.result.items or res.result)) or {}) do
+      -- Servers may offer snippet insertText ($0 placeholders); an
+      -- omnifunc inserts plain text, so those fall back to the label.
+      local word = it.label
+      if (it.insertTextFormat or 1) == 1 then
+        word = (it.textEdit and it.textEdit.newText)
+          or it.insertText or it.label
+      end
+      if vim.startswith(it.filterText or it.label, base)
+          or vim.startswith(word, base) then
+        local doc = it.documentation
+        table.insert(items, {
+          word = word,
+          abbr = it.label,
+          menu = vim.lsp.protocol.CompletionItemKind[it.kind] or '',
+          info = type(doc) == 'table' and doc.value or doc or '',
+          icase = 0,
+          dup = 0,
+        })
+      end
+    end
+  end
+  return items
+end
+@
+
+Hover shows the server's documentation in a floating window over
+the [[.nw]] buffer; a [[false]] return lets the caller fall back to
+the ordinary [[K]].  Definition results need one more map: a target
+inside the shadow is translated back to its source line (and its
+own column correction---the definition may sit at another splice
+depth); a target in some other file is a real file, jumped to
+directly.  Both jumps set the jump mark, so [[CTRL-O]] returns.
+
+<<shadow: LSP queries at the cursor>>=
+function M.hover()
+  local sh, params = cursor_params(vim.api.nvim_get_current_buf())
+  if not sh then
+    return false
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/hover', params, 3000)
+  for _, res in pairs(results or {}) do
+    if res.result and res.result.contents then
+      local lines = vim.lsp.util.convert_input_to_markdown_lines(
+        res.result.contents)
+      if #lines > 0 then
+        vim.lsp.util.open_floating_preview(lines, 'markdown',
+          { border = 'rounded' })
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function M.definition()
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if not sh then
+    return false
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/definition', params, 3000)
+  for _, res in pairs(results or {}) do
+    local locs = res.result or {}
+    if locs.uri or locs.targetUri then
+      locs = { locs }
+    end
+    for _, loc in ipairs(locs) do
+      local uri = loc.uri or loc.targetUri
+      local range = loc.range or loc.targetSelectionRange
+      vim.cmd([[normal! m']])
+      if uri == vim.uri_from_bufnr(sh.buf) then
+        local nl = sh.src[range.start.line + 1]
+        if nl then
+          local d = col_delta(sh, range.start.line + 1, nwbuf)
+          vim.api.nvim_win_set_cursor(0,
+            { nl, math.max(0, range.start.character - d) })
+          return true
+        end
+      else
+        local client = vim.lsp.get_clients({ bufnr = sh.buf })[1]
+        vim.lsp.util.show_document(loc, client.offset_encoding,
+          { focus = true })
+        return true
+      end
+    end
+  end
+  return false
+end
+@
+
+\subsection{Routing the omnifunc}
+\label{sec:router}
+
+One omnifunc serves three targets, which keeps every completion
+frontend working through the single interface it already knows.
+The route is decided at [[findstart]] time and remembered for the
+candidates call:
+
+\begin{enumerate}
+\item after an unclosed [[@<<]]: chunk names (\cref{sec:complete});
+\item on a line some shadow holds: that shadow's language server;
+\item in prose with VimTeX initialized: VimTeX's own omnifunc,
+  delegated wholesale (it knows where a [[\cite]] or [[\ref]]
+  argument begins).
+\end{enumerate}
+
+For the language-server route the start-of-word rule is the
+keyword-character run before the cursor---what an identifier means
+in most languages; the server itself decides what the candidates
+are.
+
+The chosen route is script state between the omnifunc's two calls.
+It is initialized at load time so that a candidates call without a
+preceding [[findstart]]---no real frontend does that, but a
+re-sourced script would---degrades to an empty answer instead of an
+error.
+
+<<the route between the omnifunc's two calls>>=
+let s:route = ''
+@
+
+<<route the completion and find its start>>=
+let l:before = strpart(getline('.'), 0, col('.') - 1)
+let l:start = matchend(l:before, '.*@\@1<!@<<')
+if l:start >= 0 && stridx(l:before, '>', l:start) < 0
+  let s:route = 'chunk'
+  return l:start
+endif
+if has('nvim') && get(g:, 'noweb_shadow', 1)
+      \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+  let s:route = 'lsp'
+  return col('.') - 1 - len(matchstr(l:before, '\k*$'))
+endif
+if exists('b:vimtex')
+  let s:route = 'tex'
+  return vimtex#complete#omnifunc(a:findstart, a:base)
+endif
+let s:route = ''
+return -3
+@
+
+<<produce the candidates for the routed target>>=
+if s:route ==# 'lsp'
+  return luaeval('require("noweb.shadow").complete(_A)', a:base)
+elseif s:route ==# 'tex'
+  return vimtex#complete#omnifunc(a:findstart, a:base)
+elseif s:route !=# 'chunk'
+  return []
+endif
+<<collect the matching chunk names>>
+@
+
+\subsection{Hover and definitions}
+\label{sec:hoverdef}
+
+[[K]] and [[gd]] get shadow-aware variants that fall back to the
+built-in behaviour ([['keywordprg']] and the local-declaration
+search) whenever the cursor is outside every shadow or the server
+has nothing to say---so the maps are safe buffer-wide, prose
+included.  Chunk references keep their own goto: \texttt{CTRL-]}
+through the tagfunc (\cref{sec:tagfunc}) is untouched.
+
+<<[[noweb#hover]] and [[noweb#definition]]>>=
+" K / gd with shadow-LSP answers inside code chunks, falling back to
+" the built-in behaviour elsewhere.
+function! noweb#hover() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
+    normal! K
+  endif
+endfunction
+
+function! noweb#definition() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
+    normal! gd
+  endif
+endfunction
+
+function! s:shadowed() abort
+  return has('nvim') && get(g:, 'noweb_shadow', 1)
+        \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+endfunction
+@
+
+<<the hover and definition maps>>=
+nnoremap <silent> <Plug>(noweb-hover) :<C-u>call noweb#hover()<CR>
+nnoremap <silent> <Plug>(noweb-definition) :<C-u>call noweb#definition()<CR>
+if !get(g:, 'noweb_no_maps', 0)
+  if !hasmapto('<Plug>(noweb-hover)', 'n')
+    nmap <buffer> K <Plug>(noweb-hover)
+  endif
+  if !hasmapto('<Plug>(noweb-definition)', 'n')
+    nmap <buffer> gd <Plug>(noweb-definition)
+  endif
+endif
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> K'
+      \ . ' | silent! nunmap <buffer> gd'
+@
+
+\subsection{VimTeX for the prose}
+\label{sec:vimtexprose}
+
+The prose of a noweb file \emph{is} a \TeX{} document, and VimTeX
+is the \TeX{} toolchain of choice: motions, text objects, the table
+of contents, delimiter matching, and the completion the router
+delegates to.  VimTeX only initializes itself for the [[tex]]
+filetype, but its entire per-buffer setup is one documented call
+away.  After it, two buffer-local options are taken back: VimTeX
+claims the omnifunc (ours routes to VimTeX's instead), and the
+tagfunc stays with chunk navigation.  Both undo scripts are
+preserved, chained.  [[g:noweb_vimtex]] opts out wholesale.
+
+<<initialize VimTeX for the prose>>=
+if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
+      \ && !empty(globpath(&runtimepath, 'autoload/vimtex.vim'))
+  let s:undo = b:undo_ftplugin
+  unlet b:undo_ftplugin
+  silent! call vimtex#init()
+  let b:undo_ftplugin = s:undo
+        \ . (empty(get(b:, 'undo_ftplugin', ''))
+        \    ? '' : ' | ' . b:undo_ftplugin)
+  setlocal omnifunc=noweb#complete
+  if exists('+tagfunc')
+    setlocal tagfunc=noweb#tagfunc
+  endif
+endif
 @
 
 \subsection{Hooking the shadows into the buffer}

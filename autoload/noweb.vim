@@ -318,6 +318,8 @@ let s:DEF = '^<<\zs.\{-1,}\ze>>=\s*$'
 let s:REF = '<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze>>'
 let s:HOT = '<<\|^@\%( \|$\)'
 
+let s:route = ''
+
 " Chunk references on one line as [name, start, end] triples, with
 " 0-based byte indices of the name between the brackets.  The @-escape
 " tests live here as string comparisons; see s:REF.
@@ -406,15 +408,36 @@ function! s:chunk_at_cursor() abort
   return ''
 endfunction
 
-" Omnifunc completing chunk names after << (:h complete-functions).
+" Omnifunc routing by context (:h complete-functions): chunk names
+" after <<, the shadow's language server inside a code chunk,
+" VimTeX in prose.  See the routing chunks in the language-
+" intelligence section.
 function! noweb#complete(findstart, base) abort
   if a:findstart
     let l:before = strpart(getline('.'), 0, col('.') - 1)
     let l:start = matchend(l:before, '.*@\@1<!<<')
-    if l:start < 0 || stridx(l:before, '>', l:start) >= 0
-      return -3
+    if l:start >= 0 && stridx(l:before, '>', l:start) < 0
+      let s:route = 'chunk'
+      return l:start
     endif
-    return l:start
+    if has('nvim') && get(g:, 'noweb_shadow', 1)
+          \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+      let s:route = 'lsp'
+      return col('.') - 1 - len(matchstr(l:before, '\k*$'))
+    endif
+    if exists('b:vimtex')
+      let s:route = 'tex'
+      return vimtex#complete#omnifunc(a:findstart, a:base)
+    endif
+    let s:route = ''
+    return -3
+  endif
+  if s:route ==# 'lsp'
+    return luaeval('require("noweb.shadow").complete(_A)', a:base)
+  elseif s:route ==# 'tex'
+    return vimtex#complete#omnifunc(a:findstart, a:base)
+  elseif s:route !=# 'chunk'
+    return []
   endif
   let l:occ = s:chunk_occurrences()
   let l:close = getline('.')[col('.') - 1] ==# '>' ? '' : '>>'
@@ -510,4 +533,23 @@ endfunction
 
 function! noweb#languages() abort
   return s:infer_languages()
+endfunction
+
+" K / gd with shadow-LSP answers inside code chunks, falling back to
+" the built-in behaviour elsewhere.
+function! noweb#hover() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
+    normal! K
+  endif
+endfunction
+
+function! noweb#definition() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
+    normal! gd
+  endif
+endfunction
+
+function! s:shadowed() abort
+  return has('nvim') && get(g:, 'noweb_shadow', 1)
+        \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
 endfunction

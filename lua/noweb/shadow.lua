@@ -207,6 +207,109 @@ function M.locate(nwbuf, lnum)
   return nil
 end
 
+local function cursor_params(nwbuf)
+  local lnum, col = unpack(vim.api.nvim_win_get_cursor(0))
+  local sh, t, delta = M.locate(nwbuf, lnum)
+  if not sh or #vim.lsp.get_clients({ bufnr = sh.buf }) == 0 then
+    return nil
+  end
+  return sh, {
+    textDocument = { uri = vim.uri_from_bufnr(sh.buf) },
+    position = { line = t - 1, character = col + delta },
+  }
+end
+
+function M.complete(base)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if not sh then
+    return {}
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/completion', params, 3000)
+  local items = {}
+  for _, res in pairs(results or {}) do
+    for _, it in ipairs((res.result and (res.result.items or res.result)) or {}) do
+      -- Servers may offer snippet insertText ($0 placeholders); an
+      -- omnifunc inserts plain text, so those fall back to the label.
+      local word = it.label
+      if (it.insertTextFormat or 1) == 1 then
+        word = (it.textEdit and it.textEdit.newText)
+          or it.insertText or it.label
+      end
+      if vim.startswith(it.filterText or it.label, base)
+          or vim.startswith(word, base) then
+        local doc = it.documentation
+        table.insert(items, {
+          word = word,
+          abbr = it.label,
+          menu = vim.lsp.protocol.CompletionItemKind[it.kind] or '',
+          info = type(doc) == 'table' and doc.value or doc or '',
+          icase = 0,
+          dup = 0,
+        })
+      end
+    end
+  end
+  return items
+end
+function M.hover()
+  local sh, params = cursor_params(vim.api.nvim_get_current_buf())
+  if not sh then
+    return false
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/hover', params, 3000)
+  for _, res in pairs(results or {}) do
+    if res.result and res.result.contents then
+      local lines = vim.lsp.util.convert_input_to_markdown_lines(
+        res.result.contents)
+      if #lines > 0 then
+        vim.lsp.util.open_floating_preview(lines, 'markdown',
+          { border = 'rounded' })
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function M.definition()
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if not sh then
+    return false
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/definition', params, 3000)
+  for _, res in pairs(results or {}) do
+    local locs = res.result or {}
+    if locs.uri or locs.targetUri then
+      locs = { locs }
+    end
+    for _, loc in ipairs(locs) do
+      local uri = loc.uri or loc.targetUri
+      local range = loc.range or loc.targetSelectionRange
+      vim.cmd([[normal! m']])
+      if uri == vim.uri_from_bufnr(sh.buf) then
+        local nl = sh.src[range.start.line + 1]
+        if nl then
+          local d = col_delta(sh, range.start.line + 1, nwbuf)
+          vim.api.nvim_win_set_cursor(0,
+            { nl, math.max(0, range.start.character - d) })
+          return true
+        end
+      else
+        local client = vim.lsp.get_clients({ bufnr = sh.buf })[1]
+        vim.lsp.util.show_document(loc, client.offset_encoding,
+          { focus = true })
+        return true
+      end
+    end
+  end
+  return false
+end
+
 function M.setup(nwbuf)
   nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
   if state[nwbuf] then
