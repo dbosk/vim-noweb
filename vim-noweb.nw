@@ -561,6 +561,8 @@ happens to be pedagogical order as well:
 <<[[noweb#next_occurrence]]>>
 
 <<[[noweb#refs]]>>
+
+<<[[noweb#occurrences]] and [[noweb#languages]] accessors>>
 @
 
 <<autoload file header>>=
@@ -1183,6 +1185,8 @@ let b:did_ftplugin = 1
 <<hook completion and navigation into the buffer>>
 
 <<the occurrence maps and the [[:NowebRefs]] command>>
+
+<<start the shadow machinery>>
 @
 
 [[b:undo_ftplugin]] is the ftplugin counterpart of the syntax file's
@@ -1766,6 +1770,439 @@ function! s:no_chunk() abort
   echomsg 'noweb: no chunk name under the cursor'
   echohl None
 endfunction
+@
+
+\section{Language intelligence in chunks}
+\label{sec:shadow}
+
+Completion and navigation (\cref{sec:navigation}) understand noweb's
+\emph{structure}; this section is about understanding the
+\emph{languages}.  A Python chunk should get Python diagnostics,
+completion, hover documentation and goto-definition---the things a
+language server provides---and the prose should get a full \TeX{}
+toolchain.  The plugin cannot reimplement any of that, and following
+the by now familiar principle, it does not try: it arranges for the
+tools that already exist to see the code they expect.
+
+The arrangement is an \emph{invisible tangled buffer} per root
+chunk: a hidden buffer holding the real tangled program, kept in
+sync with the noweb source, with a language server attached to it.
+Every query---diagnostics, completion, a definition lookup---runs
+against the shadow buffer, and every result is mapped back into the
+[[.nw]] buffer.  Tangling for real, rather than extracting chunk
+regions in place, is what makes the language server's view
+\emph{honest}:
+chunks appear in tangled order and at their spliced indentation, so
+Python's indentation-sensitive parse and cross-chunk references both
+work.  This is Neovim-only ([[vim.system]], [[vim.lsp]],
+[[vim.diagnostic]]); on Vim the plugin simply keeps its
+v1.6.1 behaviour.
+
+The line mapping does not have to be invented: noweb's
+\texttt{linemark} filter (from the author's noweb fork,
+\texttt{contrib/dbosk}) exists precisely because [[notangle -L]]
+cannot preserve indentation in languages like Python.  Run as
+[[notangle -filter linemark]], it inserts a source-location comment
+at the start of each code chunk and after each line that uses a
+chunk---\texttt{\# 5 "foo.nw"}, with a configurable comment
+leader---and tangles \emph{without} [[-L]], so the code itself is
+untouched.  A marker announces the source line of the tangled line
+that follows it; lines then advance in lockstep until the next
+marker.  The markers stay in the shadow buffer (they are comments;
+the language server reads past them) and \emph{are} the map: one
+pass over the buffer recovers, for every tangled line, its source
+line---unique, because every tangled line comes from exactly one
+source line.  The forward direction is ambiguous when a chunk is
+spliced more than once; the plugin then maps to the first splice.
+Columns differ from the source only by the splice indentation, so
+the column correction is the difference in leading whitespace.
+(The companion \texttt{nolinemap} maps \emph{tool output} back the
+same way; \cref{sec:nowebmake} uses it directly.)
+
+\subsection{What the Lua side needs to know}
+
+The shadow module needs two things the Vim script side already
+computes: the chunk inventory (roots are chunks that are defined but
+never used) and each chunk's language (\cref{sec:infer}).  Script's
+locals stay local; two accessors export them.
+
+<<[[noweb#occurrences]] and [[noweb#languages]] accessors>>=
+" Accessors for the Lua shadow module (lua/noweb/shadow.lua): the
+" occurrence inventory and the chunk-language map of this buffer.
+function! noweb#occurrences() abort
+  return s:chunk_occurrences()
+endfunction
+
+function! noweb#languages() abort
+  return s:infer_languages()
+endfunction
+@
+
+\subsection{The shadow module}
+\label{sec:shadowmodule}
+
+The module keeps, per noweb buffer, one shadow per typed root:
+the hidden buffer, the two line maps, and the marker set.  Sync is
+memoized on [[b:changedtick]] exactly like the occurrence scan.
+
+<<[[lua/noweb/shadow.lua]]>>=
+-- lua/noweb/shadow.lua -- invisible tangled buffers backing language
+-- intelligence (diagnostics, completion, hover, goto) in code chunks.
+--
+-- One shadow per typed root chunk: a hidden buffer holding
+--   notangle -t8 -filter "linemark -c <leader>" -R<root>
+-- of the live .nw buffer.  The linemark markers stay in the buffer
+-- and provide the line maps; language servers attach to the shadow
+-- and results map back into the .nw buffer.
+
+local M = {}
+
+-- state[nwbuf] = { tick = changedtick, roots = { [root] = shadow } }
+-- shadow = { buf, root, lang, cfg, ns,
+--            src = { tangled line -> source line },
+--            fwd = { source line -> first tangled line },
+--            marker = { tangled line -> true } }
+local state = {}
+
+-- NB: the skeleton splices the diagnostics chunk before the buffer
+-- chunk, although the document presents them the other way around:
+-- the autocmd closure in ensure_shadow captures forward_diagnostics
+-- as an upvalue, which requires the local to exist first.
+
+<<shadow: language configuration>>
+
+<<shadow: discover the typed roots>>
+
+<<shadow: tangle one root with markers>>
+
+<<shadow: parse the markers into line maps>>
+
+<<shadow: forward diagnostics into the noweb buffer>>
+
+<<shadow: the hidden buffer and its language server>>
+
+<<shadow: sync>>
+
+<<shadow: locate a source position in a shadow>>
+
+<<shadow: setup>>
+
+return M
+@
+
+Languages are described by a comment leader (for linemark), a
+filetype (set on the shadow buffer: it names the language to the LSP
+client and lets that language's own plugins---lean.nvim, for
+one---attach their machinery), and optionally a language-server
+command.  The keys are Vim syntax names, the same names the language
+inference produces.  [[g:noweb_languages]] extends or overrides the
+defaults.
+
+<<shadow: language configuration>>=
+local defaults = {
+  python = { leader = '#', filetype = 'python',
+             lsp = { 'jedi-language-server' } },
+  lean   = { leader = '--', filetype = 'lean' },
+  lua    = { leader = '--', filetype = 'lua' },
+}
+
+local function language_config()
+  return vim.tbl_deep_extend('force', defaults, vim.g.noweb_languages or {})
+end
+@
+
+A root is a chunk that is defined but never used; it gets a shadow
+when its inferred language has a configuration.  Both facts come
+from the Vim script side through the accessors, so there is exactly
+one inventory and one inference.
+
+<<shadow: discover the typed roots>>=
+local function typed_roots(nwbuf)
+  local occ, langs
+  vim.api.nvim_buf_call(nwbuf, function()
+    occ = vim.fn['noweb#occurrences']()
+    langs = vim.fn['noweb#languages']()
+  end)
+  local cfg = language_config()
+  local roots = {}
+  for name, entry in pairs(occ) do
+    if #entry.defs > 0 and #entry.uses == 0 then
+      local lang = langs[name]
+      if lang and cfg[lang] then
+        roots[name] = { lang = lang, cfg = cfg[lang] }
+      end
+    end
+  end
+  return roots
+end
+@
+
+Tangling feeds the \emph{live buffer} to notangle on stdin, so
+unsaved chunks are part of the shadow the moment they are typed.
+The leader is single-quoted inside the filter string because
+notangle hands the filter to a shell (an unquoted [[#]] would start
+a comment there).  The call is synchronous; notangle on a large
+source is a few milliseconds, and sync is memoized and debounced.
+
+<<shadow: tangle one root with markers>>=
+local function tangle(nwbuf, root, leader)
+  local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
+  local res = vim.system({
+    'notangle', '-t8',
+    '-filter', "linemark -c '" .. leader .. "'",
+    '-R' .. root,
+  }, { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(5000)
+  if not res or res.code ~= 0 then
+    return nil
+  end
+  local out = vim.split(res.stdout or '', '\n')
+  if out[#out] == '' then
+    table.remove(out)
+  end
+  return out
+end
+@
+
+A marker line announces the source line of the tangled line that
+follows; both the marker and that line map to it, and subsequent
+lines count up until the next marker.  Markers are indented with
+their splice, hence the leading-whitespace allowance.
+
+<<shadow: parse the markers into line maps>>=
+local function parse_maps(lines, leader)
+  local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
+  local src, fwd, marker = {}, {}, {}
+  local cur = nil
+  for t, line in ipairs(lines) do
+    local announced = line:match(pat)
+    if announced then
+      cur = tonumber(announced)
+      marker[t] = true
+      src[t] = cur
+    elseif cur then
+      src[t] = cur
+      if not fwd[cur] then
+        fwd[cur] = t
+      end
+      cur = cur + 1
+    end
+  end
+  return src, fwd, marker
+end
+@
+
+The shadow buffer is an unlisted scratch buffer named after the
+source and the root, so buffer lists and language servers can tell
+shadows apart.  Setting its filetype is deliberately more than
+cosmetic: the LSP client derives the document's language from it,
+and the language's own ftplugins run on the hidden buffer.  The
+server, when configured, is started with the noweb file's directory
+as root; [[vim.lsp.start]] reuses a running client for the same
+name and root.
+
+<<shadow: the hidden buffer and its language server>>=
+local function shadow_name(nwbuf, root)
+  local nwname = vim.api.nvim_buf_get_name(nwbuf)
+  return nwname .. '.shadow/' .. root:gsub('[%[%]]', '')
+end
+
+local function ensure_shadow(nwbuf, root, lang, cfg)
+  local st = state[nwbuf]
+  local sh = st.roots[root]
+  if not (sh and vim.api.nvim_buf_is_valid(sh.buf)) then
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, shadow_name(nwbuf, root))
+    sh = { buf = buf, root = root, lang = lang, cfg = cfg,
+           ns = vim.api.nvim_create_namespace('noweb-shadow:' .. root) }
+    st.roots[root] = sh
+    vim.bo[buf].filetype = cfg.filetype
+    if cfg.lsp then
+      vim.lsp.start({
+        name = 'noweb-' .. lang,
+        cmd = cfg.lsp,
+        root_dir = vim.fs.dirname(vim.api.nvim_buf_get_name(nwbuf)),
+      }, { bufnr = buf })
+    end
+    <<shadow: forward this shadow's diagnostics>>
+  end
+  return sh
+end
+@
+
+Diagnostics translate line by line: the diagnostic's tangled line
+looks up its source line, the column moves by the difference in
+leading whitespace (the splice indent), and diagnostics on marker
+lines---lines the author never wrote---are dropped.  The translated
+set is published on the noweb buffer in the shadow's own namespace,
+so several roots coexist.
+
+<<shadow: forward diagnostics into the noweb buffer>>=
+local function indent_width(line)
+  return #(line:match('^%s*') or '')
+end
+
+local function col_delta(sh, t, nwbuf)
+  local tline = (vim.api.nvim_buf_get_lines(sh.buf, t - 1, t, false)[1]) or ''
+  local nline = (vim.api.nvim_buf_get_lines(
+    nwbuf, sh.src[t] - 1, sh.src[t], false)[1]) or ''
+  return indent_width(tline) - indent_width(nline)
+end
+
+local function forward_diagnostics(nwbuf, sh)
+  local out = {}
+  for _, d in ipairs(vim.diagnostic.get(sh.buf)) do
+    local t = d.lnum + 1
+    if sh.src[t] and not sh.marker[t] then
+      local delta = col_delta(sh, t, nwbuf)
+      local nd = vim.tbl_extend('force', {}, d)
+      nd.bufnr = nwbuf
+      nd.lnum = sh.src[t] - 1
+      nd.col = math.max(0, d.col - delta)
+      if nd.end_lnum and sh.src[nd.end_lnum + 1] then
+        nd.end_lnum = sh.src[nd.end_lnum + 1] - 1
+        nd.end_col = math.max(0, (nd.end_col or 0) - delta)
+      else
+        nd.end_lnum = nd.lnum
+        nd.end_col = nd.col
+      end
+      table.insert(out, nd)
+    end
+  end
+  vim.diagnostic.set(sh.ns, nwbuf, out)
+end
+@
+
+<<shadow: forward this shadow's diagnostics>>=
+vim.api.nvim_create_autocmd('DiagnosticChanged', {
+  buffer = sh.buf,
+  callback = function()
+    if vim.api.nvim_buf_is_valid(nwbuf) then
+      forward_diagnostics(nwbuf, sh)
+    end
+  end,
+})
+@
+
+Sync re-tangles every typed root whose buffer changed since the last
+sync, updates the shadow buffers (which sends the language servers
+their [[didChange]]), rebuilds the maps, and drops shadows whose
+root disappeared.
+
+<<shadow: sync>>=
+function M.sync(nwbuf)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = state[nwbuf]
+  if not st then
+    return nil
+  end
+  local tick = vim.api.nvim_buf_get_changedtick(nwbuf)
+  if st.tick == tick then
+    return st
+  end
+  st.tick = tick
+  local roots = typed_roots(nwbuf)
+  for root, sh in pairs(st.roots) do
+    if not roots[root] then
+      vim.diagnostic.reset(sh.ns, nwbuf)
+      pcall(vim.api.nvim_buf_delete, sh.buf, { force = true })
+      st.roots[root] = nil
+    end
+  end
+  for root, info in pairs(roots) do
+    local lines = tangle(nwbuf, root, info.cfg.leader)
+    if lines then
+      local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
+      sh.src, sh.fwd, sh.marker = parse_maps(lines, info.cfg.leader)
+      local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+      if not vim.deep_equal(old, lines) then
+        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, lines)
+      end
+      forward_diagnostics(nwbuf, sh)
+    end
+  end
+  return st
+end
+@
+
+Queries need to know which shadow, if any, holds a given source
+line, and where.  Prose lines are in no shadow; a line of a chunk
+spliced several times maps to its first splice.
+
+<<shadow: locate a source position in a shadow>>=
+-- Locate source line lnum: returns shadow, tangled line, column delta.
+function M.locate(nwbuf, lnum)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = M.sync(nwbuf)
+  if not st then
+    return nil
+  end
+  for _, sh in pairs(st.roots) do
+    local t = sh.fwd[lnum]
+    if t then
+      return sh, t, col_delta(sh, t, nwbuf)
+    end
+  end
+  return nil
+end
+@
+
+Setup runs once per noweb buffer, from the ftplugin: an initial
+sync, a debounced re-sync on edits (leaving insert mode or any
+change in normal mode), and cleanup when the buffer goes away.  The
+debounce keeps diagnostics live without tangling on every
+keystroke; queries call [[M.sync]] themselves, so they never see a
+stale shadow regardless of the timer.
+
+<<shadow: setup>>=
+function M.setup(nwbuf)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  if state[nwbuf] then
+    return
+  end
+  state[nwbuf] = { tick = -1, roots = {} }
+  local group = vim.api.nvim_create_augroup('noweb-shadow:' .. nwbuf, {})
+  local pending = false
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      if not pending then
+        pending = true
+        vim.defer_fn(function()
+          pending = false
+          if vim.api.nvim_buf_is_valid(nwbuf) then
+            M.sync(nwbuf)
+          end
+        end, 300)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      for _, sh in pairs(state[nwbuf].roots) do
+        pcall(vim.api.nvim_buf_delete, sh.buf, { force = true })
+      end
+      state[nwbuf] = nil
+      vim.api.nvim_del_augroup_by_id(group)
+    end,
+  })
+  M.sync(nwbuf)
+end
+@
+
+\subsection{Hooking the shadows into the buffer}
+
+The ftplugin starts the machinery on Neovim unless the user opts
+out; everything degrades gracefully when notangle (or linemark) is
+missing---the module simply produces no shadows, and the plugin is
+back to its v1.6.1 feature set.
+
+<<start the shadow machinery>>=
+if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
+  lua require('noweb.shadow').setup(0)
+endif
 @
 
 \section{Building and maintaining}

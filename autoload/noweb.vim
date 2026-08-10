@@ -501,3 +501,13 @@ function! s:no_chunk() abort
   echomsg 'noweb: no chunk name under the cursor'
   echohl None
 endfunction
+
+" Accessors for the Lua shadow module (lua/noweb/shadow.lua): the
+" occurrence inventory and the chunk-language map of this buffer.
+function! noweb#occurrences() abort
+  return s:chunk_occurrences()
+endfunction
+
+function! noweb#languages() abort
+  return s:infer_languages()
+endfunction

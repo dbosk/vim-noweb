@@ -33,3 +33,7 @@ endif
 let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
       \ . ' | silent! nunmap <buffer> [c'
       \ . ' | silent! delcommand -buffer NowebRefs'
+
+if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
+  lua require('noweb.shadow').setup(0)
+endif

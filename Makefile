@@ -6,7 +6,7 @@
 NWSRC=	vim-noweb.nw
 TANGLED=	syntax/noweb.vim autoload/noweb.vim ftdetect/noweb.vim
 TANGLED+=	ftplugin/noweb.vim plugin/noweb.vim
-TANGLED+=	lua/noweb/scan.lua
+TANGLED+=	lua/noweb/scan.lua lua/noweb/shadow.lua
 TANGLED+=	LICENSE
 
 .PHONY: all
