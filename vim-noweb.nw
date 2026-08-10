@@ -1985,7 +1985,8 @@ local defaults = {
              lsp = { 'jedi-language-server' },
              definitions = { '^%s*def%s+@NAME@%s*%(',
                              '^%s*class%s+@NAME@%f[%W]',
-                             '^@NAME@%s*=' } },
+                             '^%s*@NAME@%s*=',
+                             '%f[%w]for%s+@NAME@%f[%W]' } },
   lean   = { leader = '--', filetype = 'lean',
              definitions = { '%f[%w]def%s+@NAME@%f[%W]',
                              '%f[%w]theorem%s+@NAME@%f[%W]',
@@ -1994,11 +1995,21 @@ local defaults = {
   lua    = { leader = '--', filetype = 'lua',
              definitions = { 'function%s+@NAME@%f[%W]',
                              'local%s+function%s+@NAME@%f[%W]',
-                             'local%s+@NAME@%s*=' } },
+                             'local%s+@NAME@%f[%W]',
+                             '^%s*@NAME@%s*=',
+                             '%f[%w]for%s+@NAME@%f[%W]' } },
   sh     = { leader = '#', filetype = 'sh',
              definitions = { '^%s*@NAME@%s*%(%s*%)',
                              '^%s*function%s+@NAME@%f[%W]',
-                             '^%s*@NAME@=' } },
+                             '^%s*@NAME@=', '^%s*@NAME@%+=',
+                             '^%s*local%s[^=]*%f[%w]@NAME@%f[%W]',
+                             '^%s*export%s[^=]*%f[%w]@NAME@%f[%W]',
+                             '^%s*typeset%s[^=]*%f[%w]@NAME@%f[%W]',
+                             '^%s*declare%s[^=]*%f[%w]@NAME@%f[%W]',
+                             '^%s*readonly%s[^=]*%f[%w]@NAME@%f[%W]',
+                             '%f[%w]for%s+@NAME@%f[%W]',
+                             '%f[%w]read%s+@NAME@%f[%W]',
+                             '%f[%w]@NAME@=', '%f[%w]@NAME@%+=' } },
   make   = { leader = '#', filetype = 'make',
              definitions = { '^@NAME@%s*:' } },
 }
@@ -2393,9 +2404,12 @@ Not every language has a server, and no server is needed for the
 common case: the shadow holds the \emph{whole} tangled program, so
 when the LSP route yields nothing, a definition-pattern search over
 the shadow finds the identifier's defining line---[[assignments() {]]
-in a shell program, [[def f(]] in Python, a make target---wherever
-the defining chunk sits, and the source map turns the hit into a
-[[.nw]] jump.  The patterns live in the language configuration
+in a shell program, [[def f(]] in Python, a make target, and for
+variables the declaration or first assignment ([[local]],
+[[export]], [[x=...]], a [[for]] binding; for shell even a mid-line
+assignment, so a variable born inside generated code is
+found)---wherever the defining chunk sits, and the source map turns
+the hit into a [[.nw]] jump.  The patterns live in the language configuration
 ([[definitions]], with [[@NAME@]] standing for the identifier), so
 [[g:noweb_languages]] tunes them per language.  The fallback is
 first-match with no notion of scope; that is what it costs to work
