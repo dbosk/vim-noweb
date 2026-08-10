@@ -223,18 +223,44 @@ local function tangle(nwbuf, root, cfg)
   return rejoin_splices(out, cfg.leader)
 end
 
-local function parse_maps(lines, leader)
+local function use_lives_on(useline, nextline, pat)
+  if not useline or useline:match('^<<.->>=%s*$') then
+    return false
+  end
+  local prefix, tail = useline:match('^(.-)<<.->>(.*)$')
+  if not prefix then
+    return false
+  end
+  return prefix:find('%S') ~= nil
+    or (tail:find('%S') ~= nil
+        and nextline ~= nil and nextline:match(pat) ~= nil)
+end
+
+local function parse_maps(lines, leader, srclines)
   local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
   local src, fwd, marker = {}, {}, {}
   local cur = nil
+  local pending = {}
   for t, line in ipairs(lines) do
     local announced = line:match(pat)
     if announced then
+      if cur then
+        table.insert(pending, cur)
+      end
       cur = tonumber(announced)
       marker[t] = true
       src[t] = cur
     elseif cur then
       src[t] = cur
+      for _, u in ipairs(pending) do
+        if use_lives_on(srclines[u], lines[t + 1], pat) then
+          src[t] = u
+          if not fwd[u] then
+            fwd[u] = t
+          end
+        end
+      end
+      pending = {}
       if not fwd[cur] then
         fwd[cur] = t
       end
@@ -504,11 +530,13 @@ function M.sync(nwbuf)
       st.roots[root] = nil
     end
   end
+  local srclines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
   for root, info in pairs(roots) do
     local lines = tangle(nwbuf, root, info.cfg)
     if lines then
       local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
-      sh.src, sh.fwd, sh.marker = parse_maps(lines, info.cfg.leader)
+      sh.src, sh.fwd, sh.marker =
+        parse_maps(lines, info.cfg.leader, srclines)
       local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
       if not vim.deep_equal(old, lines) then
         -- the preview marks the shadow nomodifiable; lift it briefly

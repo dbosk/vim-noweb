@@ -2250,10 +2250,9 @@ tab-aware at notangle's default tab stops of eight).  The result
 is byte-identical to the plain tangle except for whole-line
 markers, everywhere.  The maps stay exact too, with one nuance:
 the joined line carries text from two source lines---the use line
-and the chunk's first---and the marker in front attributes it to
-the chunk's first line, which is where most of its content comes
-from.  The use line itself ends up with no tangled line of its
-own, which is honest: its pieces live inside the junction.
+and the chunk's first---and one line can only map to one.  The
+marker parser below settles that in the use line's favor whenever
+its text visibly lives on in the junction.
 
 The relocated marker also keeps the tangle self-describing for
 \texttt{nolinemap}, which derives the same map from the same
@@ -2313,19 +2312,76 @@ lines count up until the next marker.  After the rejoining above,
 every marker stands on a line of its own.  Markers are indented
 with their splice, hence the leading-whitespace allowance.
 
+One refinement, and it is what makes the maps usable around
+mid-line uses.  A marker that interrupts the running count marks a
+chunk use, and the source line it interrupted---the use line---may
+live on in the tangled line after the marker: the rejoined
+junction starts with the text the use line put before the
+reference, and a chunk of a single line gets the use line's tail
+glued on.  Attributing that line to the announced chunk line, as
+the plain counting would, orphans the use line entirely---and a
+chunk like
+
+\begin{minted}{text}
+@<<grep@>>=
+grep -qiEo
+@
+\end{minted}
+
+\noindent
+used once per pattern line makes it absurd: six tangled lines all
+mapping to the one-line definition, six use lines mapping nowhere,
+and the preview cursor going still over the whole block.  So when
+the use line visibly lives on in the junction---text before the
+reference, or a tail glued to a single-line chunk (the tangled
+line after the junction is a marker again)---the junction maps to
+the \emph{use} line.  A whole-line use contributes nothing to its
+splice, and the splice stays the chunk's, exactly as before.
+Nested splices can stack several interrupted lines onto one
+junction (a use expanding a chunk whose first line is again a
+use); each of them gets its forward mapping into the junction, and
+the reverse map goes to the innermost, whose text dominates the
+line.
+
 <<shadow: parse the markers into line maps>>=
-local function parse_maps(lines, leader)
+local function use_lives_on(useline, nextline, pat)
+  if not useline or useline:match('^@<<.-@>>=%s*$') then
+    return false
+  end
+  local prefix, tail = useline:match('^(.-)@<<.-@>>(.*)$')
+  if not prefix then
+    return false
+  end
+  return prefix:find('%S') ~= nil
+    or (tail:find('%S') ~= nil
+        and nextline ~= nil and nextline:match(pat) ~= nil)
+end
+
+local function parse_maps(lines, leader, srclines)
   local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
   local src, fwd, marker = {}, {}, {}
   local cur = nil
+  local pending = {}
   for t, line in ipairs(lines) do
     local announced = line:match(pat)
     if announced then
+      if cur then
+        table.insert(pending, cur)
+      end
       cur = tonumber(announced)
       marker[t] = true
       src[t] = cur
     elseif cur then
       src[t] = cur
+      for _, u in ipairs(pending) do
+        if use_lives_on(srclines[u], lines[t + 1], pat) then
+          src[t] = u
+          if not fwd[u] then
+            fwd[u] = t
+          end
+        end
+      end
+      pending = {}
       if not fwd[cur] then
         fwd[cur] = t
       end
@@ -2455,11 +2511,13 @@ function M.sync(nwbuf)
       st.roots[root] = nil
     end
   end
+  local srclines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
   for root, info in pairs(roots) do
     local lines = tangle(nwbuf, root, info.cfg)
     if lines then
       local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
-      sh.src, sh.fwd, sh.marker = parse_maps(lines, info.cfg.leader)
+      sh.src, sh.fwd, sh.marker =
+        parse_maps(lines, info.cfg.leader, srclines)
       local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
       if not vim.deep_equal(old, lines) then
         -- the preview marks the shadow nomodifiable; lift it briefly
