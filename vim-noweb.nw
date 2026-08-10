@@ -1934,10 +1934,11 @@ local M = {}
 --            marker = { tangled line -> true } }
 local state = {}
 
--- NB: the skeleton splices the diagnostics chunk before the buffer
--- chunk, although the document presents them the other way around:
--- the autocmd closure in ensure_shadow captures forward_diagnostics
--- as an upvalue, which requires the local to exist first.
+-- NB: the skeleton splices a few chunks in dependency order rather
+-- than the document's presentation order: a closure captures a local
+-- as an upvalue only if the local exists at definition time, so
+-- forward_diagnostics precedes ensure_shadow's autocmd, and the
+-- preview state precedes sync's view refresh.
 
 <<shadow: language configuration>>
 
@@ -1951,13 +1952,13 @@ local state = {}
 
 <<shadow: the hidden buffer and its language server>>
 
+<<shadow: the synced preview>>
+
 <<shadow: sync>>
 
 <<shadow: locate a source position in a shadow>>
 
 <<shadow: LSP queries at the cursor>>
-
-<<shadow: the synced preview>>
 
 <<shadow: quickfix through nolinemap>>
 
@@ -2217,6 +2218,11 @@ function M.sync(nwbuf)
         vim.bo[sh.buf].modifiable = mod
       end
       forward_diagnostics(nwbuf, sh)
+      local p = preview[nwbuf]
+      if p and p.sh == sh and p.pbuf ~= sh.buf
+          and vim.api.nvim_buf_is_valid(p.pbuf) then
+        p.pv2t, p.t2pv = refresh_view(p.pbuf, sh)
+      end
     end
   end
   return st
@@ -2566,15 +2572,22 @@ endif
 \subsection{A tangled preview, in lockstep}
 \label{sec:preview}
 
-[[:NowebTangled]] shows a shadow in a read-only split---markers
-included, they are the honest map---and keeps the two windows in
-lockstep.  Moving in the source moves the preview to the
-corresponding tangled line (the first splice, when the chunk is used
-several times); moving in the preview moves the source cursor
-through the reverse map, which is total on code lines, marker lines
-answering for the line they announce.  Prose lines belong to no
-shadow, so the preview simply stays put while the cursor crosses
-them.
+[[:NowebTangled]] shows the tangled program in a read-only split and
+keeps the two windows in lockstep.  What it shows is the \emph{build
+artifact}: the linemark markers are the machinery's bookkeeping, so
+the preview filters them out---a derived buffer holding exactly what
+[[notangle]] without the filter would produce, with the language's
+own syntax highlighting.  ([[g:noweb_tangled_markers = 1]] shows the
+raw shadow instead, markers and all.)  The filtering needs no second
+tangle: the marker set is known, so one pass derives the view and
+two small maps between view lines and tangled lines, and the
+cursor-sync lookups compose through them.
+
+Moving in the source moves the preview to the corresponding tangled
+line (the first splice, when the chunk is used several times);
+moving in the preview moves the source cursor through the reverse
+map, which is total on code lines.  Prose lines belong to no shadow,
+so the preview simply stays put while the cursor crosses them.
 
 The split obeys the usual command modifiers: plain [[:NowebTangled]]
 opens below ([[g:noweb_tangled_split]] changes that default), and
@@ -2615,6 +2628,35 @@ local function preview_close(nwbuf)
   if vim.api.nvim_win_is_valid(p.win) then
     pcall(vim.api.nvim_win_close, p.win, true)
   end
+  if p.pbuf ~= p.sh.buf and vim.api.nvim_buf_is_valid(p.pbuf) then
+    pcall(vim.api.nvim_buf_delete, p.pbuf, { force = true })
+  end
+end
+
+-- The marker-free view of a shadow: fill pbuf with the non-marker
+-- lines and return the two composition maps (view line <-> tangled
+-- line; a marker maps forward to the next kept line).
+local function refresh_view(pbuf, sh)
+  local lines = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+  local view, pv2t, t2pv = {}, {}, {}
+  for t, line in ipairs(lines) do
+    if sh.marker[t] then
+      t2pv[t] = #view + 1
+    else
+      table.insert(view, line)
+      pv2t[#view] = t
+      t2pv[t] = #view
+    end
+  end
+  for t, pv in pairs(t2pv) do
+    if pv > #view then
+      t2pv[t] = #view
+    end
+  end
+  vim.bo[pbuf].modifiable = true
+  vim.api.nvim_buf_set_lines(pbuf, 0, -1, false, view)
+  vim.bo[pbuf].modifiable = false
+  return pv2t, t2pv
 end
 
 local function strip_quotes(name)
@@ -2672,6 +2714,16 @@ function M.preview(root, mods)
       .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
     return
   end
+  local show, pv2t, t2pv = sh.buf, nil, nil
+  if vim.g.noweb_tangled_markers ~= 1 then
+    show = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(show,
+      shadow_name(nwbuf, sh.root) .. ' (tangled)')
+    pv2t, t2pv = refresh_view(show, sh)
+    vim.bo[show].filetype = sh.cfg.filetype
+  else
+    vim.bo[show].modifiable = false
+  end
   local nwwin = vim.api.nvim_get_current_win()
   if mods and mods ~= '' then
     vim.cmd(mods .. ' split')
@@ -2679,15 +2731,15 @@ function M.preview(root, mods)
     vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
   end
   local pwin = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(pwin, sh.buf)
+  vim.api.nvim_win_set_buf(pwin, show)
   vim.wo[pwin].cursorline = true
-  vim.bo[sh.buf].modifiable = false
   local group = vim.api.nvim_create_augroup('noweb-preview:' .. nwbuf, {})
-  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group }
+  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group,
+                     pbuf = show, pv2t = pv2t, t2pv = t2pv }
   <<shadow: the two cursor-sync autocommands>>
   local t = sh.fwd[lnum]
   if t then
-    vim.api.nvim_win_set_cursor(pwin, { t, 0 })
+    vim.api.nvim_win_set_cursor(pwin, { t2pv and t2pv[t] or t, 0 })
     vim.api.nvim_win_call(pwin, function() vim.cmd('normal! zz') end)
   end
   vim.api.nvim_set_current_win(nwwin)
@@ -2706,7 +2758,7 @@ vim.api.nvim_create_autocmd('CursorMoved', {
     local t = p.sh.fwd[vim.api.nvim_win_get_cursor(0)[1]]
     if t then
       syncing = true
-      vim.api.nvim_win_set_cursor(p.win, { t, 0 })
+      vim.api.nvim_win_set_cursor(p.win, { p.t2pv and p.t2pv[t] or t, 0 })
       vim.api.nvim_win_call(p.win, function() vim.cmd('normal! zz') end)
       syncing = false
     end
@@ -2714,13 +2766,14 @@ vim.api.nvim_create_autocmd('CursorMoved', {
 })
 vim.api.nvim_create_autocmd('CursorMoved', {
   group = group,
-  buffer = sh.buf,
+  buffer = show,
   callback = function()
     local p = preview[nwbuf]
     if syncing or not p or not vim.api.nvim_win_is_valid(p.nwwin) then
       return
     end
-    local s = p.sh.src[vim.api.nvim_win_get_cursor(0)[1]]
+    local l = vim.api.nvim_win_get_cursor(0)[1]
+    local s = p.sh.src[p.pv2t and p.pv2t[l] or l]
     if s then
       syncing = true
       vim.api.nvim_win_set_cursor(p.nwwin, { s, 0 })

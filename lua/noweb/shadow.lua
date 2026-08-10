@@ -16,10 +16,11 @@ local M = {}
 --            marker = { tangled line -> true } }
 local state = {}
 
--- NB: the skeleton splices the diagnostics chunk before the buffer
--- chunk, although the document presents them the other way around:
--- the autocmd closure in ensure_shadow captures forward_diagnostics
--- as an upvalue, which requires the local to exist first.
+-- NB: the skeleton splices a few chunks in dependency order rather
+-- than the document's presentation order: a closure captures a local
+-- as an upvalue only if the local exists at definition time, so
+-- forward_diagnostics precedes ensure_shadow's autocmd, and the
+-- preview state precedes sync's view refresh.
 
 -- A language without an lsp entry still earns its shadow: the
 -- preview and :NowebMake work for any typed root.
@@ -164,6 +165,177 @@ local function ensure_shadow(nwbuf, root, lang, cfg)
   return sh
 end
 
+local preview = {}  -- preview[nwbuf] = { win, nwwin, sh, group }
+local syncing = false
+
+local function preview_close(nwbuf)
+  local p = preview[nwbuf]
+  if not p then
+    return
+  end
+  preview[nwbuf] = nil
+  pcall(vim.api.nvim_del_augroup_by_id, p.group)
+  if vim.api.nvim_win_is_valid(p.win) then
+    pcall(vim.api.nvim_win_close, p.win, true)
+  end
+  if p.pbuf ~= p.sh.buf and vim.api.nvim_buf_is_valid(p.pbuf) then
+    pcall(vim.api.nvim_buf_delete, p.pbuf, { force = true })
+  end
+end
+
+-- The marker-free view of a shadow: fill pbuf with the non-marker
+-- lines and return the two composition maps (view line <-> tangled
+-- line; a marker maps forward to the next kept line).
+local function refresh_view(pbuf, sh)
+  local lines = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+  local view, pv2t, t2pv = {}, {}, {}
+  for t, line in ipairs(lines) do
+    if sh.marker[t] then
+      t2pv[t] = #view + 1
+    else
+      table.insert(view, line)
+      pv2t[#view] = t
+      t2pv[t] = #view
+    end
+  end
+  for t, pv in pairs(t2pv) do
+    if pv > #view then
+      t2pv[t] = #view
+    end
+  end
+  vim.bo[pbuf].modifiable = true
+  vim.api.nvim_buf_set_lines(pbuf, 0, -1, false, view)
+  vim.bo[pbuf].modifiable = false
+  return pv2t, t2pv
+end
+
+local function strip_quotes(name)
+  return (name:gsub('%[%[', ''):gsub('%]%]', ''))
+end
+
+local function preview_pick(st, root, lnum)
+  if root and root ~= '' then
+    if st.roots[root] then
+      return st.roots[root]
+    end
+    for name, sh in pairs(st.roots) do
+      if name == '[[' .. root .. ']]' or strip_quotes(name) == root then
+        return sh
+      end
+    end
+    return nil
+  end
+  local only, n, holder = nil, 0, nil
+  for _, sh in pairs(st.roots) do
+    n = n + 1
+    only = sh
+    if sh.fwd[lnum] or sh.fwd[lnum + 1] then
+      holder = sh
+    end
+  end
+  return holder or (n == 1 and only or nil)
+end
+
+-- Root names of the current buffer's shadows, for command completion.
+function M.roots()
+  local st = M.sync(vim.api.nvim_get_current_buf())
+  local out = {}
+  for name in pairs(st and st.roots or {}) do
+    table.insert(out, name)
+  end
+  table.sort(out)
+  return out
+end
+
+function M.preview(root, mods)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  if preview[nwbuf] then
+    preview_close(nwbuf)
+    return
+  end
+  local st = M.sync(nwbuf)
+  if not st then
+    return
+  end
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = preview_pick(st, root, lnum)
+  if not sh then
+    vim.notify('noweb: name the root: :NowebTangled <root>  ('
+      .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
+    return
+  end
+  local show, pv2t, t2pv = sh.buf, nil, nil
+  if vim.g.noweb_tangled_markers ~= 1 then
+    show = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(show,
+      shadow_name(nwbuf, sh.root) .. ' (tangled)')
+    pv2t, t2pv = refresh_view(show, sh)
+    vim.bo[show].filetype = sh.cfg.filetype
+  else
+    vim.bo[show].modifiable = false
+  end
+  local nwwin = vim.api.nvim_get_current_win()
+  if mods and mods ~= '' then
+    vim.cmd(mods .. ' split')
+  else
+    vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
+  end
+  local pwin = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(pwin, show)
+  vim.wo[pwin].cursorline = true
+  local group = vim.api.nvim_create_augroup('noweb-preview:' .. nwbuf, {})
+  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group,
+                     pbuf = show, pv2t = pv2t, t2pv = t2pv }
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      local p = preview[nwbuf]
+      if syncing or not p or not vim.api.nvim_win_is_valid(p.win) then
+        return
+      end
+      local t = p.sh.fwd[vim.api.nvim_win_get_cursor(0)[1]]
+      if t then
+        syncing = true
+        vim.api.nvim_win_set_cursor(p.win, { p.t2pv and p.t2pv[t] or t, 0 })
+        vim.api.nvim_win_call(p.win, function() vim.cmd('normal! zz') end)
+        syncing = false
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = group,
+    buffer = show,
+    callback = function()
+      local p = preview[nwbuf]
+      if syncing or not p or not vim.api.nvim_win_is_valid(p.nwwin) then
+        return
+      end
+      local l = vim.api.nvim_win_get_cursor(0)[1]
+      local s = p.sh.src[p.pv2t and p.pv2t[l] or l]
+      if s then
+        syncing = true
+        vim.api.nvim_win_set_cursor(p.nwwin, { s, 0 })
+        vim.api.nvim_win_call(p.nwwin, function() vim.cmd('normal! zz') end)
+        syncing = false
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('WinClosed', {
+    group = group,
+    pattern = tostring(pwin),
+    callback = function()
+      preview_close(nwbuf)
+    end,
+  })
+  local t = sh.fwd[lnum]
+  if t then
+    vim.api.nvim_win_set_cursor(pwin, { t2pv and t2pv[t] or t, 0 })
+    vim.api.nvim_win_call(pwin, function() vim.cmd('normal! zz') end)
+  end
+  vim.api.nvim_set_current_win(nwwin)
+end
+
 function M.sync(nwbuf)
   nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
   local st = state[nwbuf]
@@ -197,6 +369,11 @@ function M.sync(nwbuf)
         vim.bo[sh.buf].modifiable = mod
       end
       forward_diagnostics(nwbuf, sh)
+      local p = preview[nwbuf]
+      if p and p.sh == sh and p.pbuf ~= sh.buf
+          and vim.api.nvim_buf_is_valid(p.pbuf) then
+        p.pv2t, p.t2pv = refresh_view(p.pbuf, sh)
+      end
     end
   end
   return st
@@ -319,137 +496,6 @@ function M.definition()
     end
   end
   return false
-end
-
-local preview = {}  -- preview[nwbuf] = { win, nwwin, sh, group }
-local syncing = false
-
-local function preview_close(nwbuf)
-  local p = preview[nwbuf]
-  if not p then
-    return
-  end
-  preview[nwbuf] = nil
-  pcall(vim.api.nvim_del_augroup_by_id, p.group)
-  if vim.api.nvim_win_is_valid(p.win) then
-    pcall(vim.api.nvim_win_close, p.win, true)
-  end
-end
-
-local function strip_quotes(name)
-  return (name:gsub('%[%[', ''):gsub('%]%]', ''))
-end
-
-local function preview_pick(st, root, lnum)
-  if root and root ~= '' then
-    if st.roots[root] then
-      return st.roots[root]
-    end
-    for name, sh in pairs(st.roots) do
-      if name == '[[' .. root .. ']]' or strip_quotes(name) == root then
-        return sh
-      end
-    end
-    return nil
-  end
-  local only, n, holder = nil, 0, nil
-  for _, sh in pairs(st.roots) do
-    n = n + 1
-    only = sh
-    if sh.fwd[lnum] or sh.fwd[lnum + 1] then
-      holder = sh
-    end
-  end
-  return holder or (n == 1 and only or nil)
-end
-
--- Root names of the current buffer's shadows, for command completion.
-function M.roots()
-  local st = M.sync(vim.api.nvim_get_current_buf())
-  local out = {}
-  for name in pairs(st and st.roots or {}) do
-    table.insert(out, name)
-  end
-  table.sort(out)
-  return out
-end
-
-function M.preview(root, mods)
-  local nwbuf = vim.api.nvim_get_current_buf()
-  if preview[nwbuf] then
-    preview_close(nwbuf)
-    return
-  end
-  local st = M.sync(nwbuf)
-  if not st then
-    return
-  end
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  local sh = preview_pick(st, root, lnum)
-  if not sh then
-    vim.notify('noweb: name the root: :NowebTangled <root>  ('
-      .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
-    return
-  end
-  local nwwin = vim.api.nvim_get_current_win()
-  if mods and mods ~= '' then
-    vim.cmd(mods .. ' split')
-  else
-    vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
-  end
-  local pwin = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(pwin, sh.buf)
-  vim.wo[pwin].cursorline = true
-  vim.bo[sh.buf].modifiable = false
-  local group = vim.api.nvim_create_augroup('noweb-preview:' .. nwbuf, {})
-  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group }
-  vim.api.nvim_create_autocmd('CursorMoved', {
-    group = group,
-    buffer = nwbuf,
-    callback = function()
-      local p = preview[nwbuf]
-      if syncing or not p or not vim.api.nvim_win_is_valid(p.win) then
-        return
-      end
-      local t = p.sh.fwd[vim.api.nvim_win_get_cursor(0)[1]]
-      if t then
-        syncing = true
-        vim.api.nvim_win_set_cursor(p.win, { t, 0 })
-        vim.api.nvim_win_call(p.win, function() vim.cmd('normal! zz') end)
-        syncing = false
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd('CursorMoved', {
-    group = group,
-    buffer = sh.buf,
-    callback = function()
-      local p = preview[nwbuf]
-      if syncing or not p or not vim.api.nvim_win_is_valid(p.nwwin) then
-        return
-      end
-      local s = p.sh.src[vim.api.nvim_win_get_cursor(0)[1]]
-      if s then
-        syncing = true
-        vim.api.nvim_win_set_cursor(p.nwwin, { s, 0 })
-        vim.api.nvim_win_call(p.nwwin, function() vim.cmd('normal! zz') end)
-        syncing = false
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd('WinClosed', {
-    group = group,
-    pattern = tostring(pwin),
-    callback = function()
-      preview_close(nwbuf)
-    end,
-  })
-  local t = sh.fwd[lnum]
-  if t then
-    vim.api.nvim_win_set_cursor(pwin, { t, 0 })
-    vim.api.nvim_win_call(pwin, function() vim.cmd('normal! zz') end)
-  end
-  vim.api.nvim_set_current_win(nwwin)
 end
 
 function M.make(cmd)
