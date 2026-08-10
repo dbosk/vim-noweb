@@ -200,12 +200,23 @@ local function rejoin_splices(lines, leader)
   return out
 end
 
+local eager
+local function eager_flag()
+  if eager == nil then
+    local res = vim.system(
+      { 'notangle', '-filter', 'linemark -e', '-Rprobe' },
+      { stdin = '<<probe>>=\nx\n@\n', text = true }):wait(2000)
+    eager = (res and res.code == 0) and '-e ' or ''
+  end
+  return eager
+end
+
 local function tangle(nwbuf, root, cfg)
   local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
   local argv = { 'notangle' }
   vim.list_extend(argv, cfg.tangle or {})
   vim.list_extend(argv, {
-    '-filter', "linemark -c '" .. cfg.leader .. "'",
+    '-filter', 'linemark ' .. eager_flag() .. "-c '" .. cfg.leader .. "'",
     '-R' .. root,
   })
   local res = vim.system(argv,
@@ -238,7 +249,7 @@ end
 
 local function parse_maps(lines, leader, srclines)
   local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
-  local src, fwd, marker = {}, {}, {}
+  local out, src, fwd, marker = {}, {}, {}, {}
   local cur = nil
   local pending = {}
   for t, line in ipairs(lines) do
@@ -248,26 +259,37 @@ local function parse_maps(lines, leader, srclines)
         table.insert(pending, cur)
       end
       cur = tonumber(announced)
-      marker[t] = true
-      src[t] = cur
+      local prev = out[#out]
+      if not (prev and prev:match('\\$')) then
+        -- a marker after a backslash-continued line would sever the
+        -- continuation: leave it out of the text, keep its
+        -- announcement for the map
+        table.insert(out, line)
+        marker[#out] = true
+        src[#out] = cur
+      end
     elseif cur then
-      src[t] = cur
+      table.insert(out, line)
+      local o = #out
+      src[o] = cur
       for _, u in ipairs(pending) do
         if use_lives_on(srclines[u], lines[t + 1], pat) then
-          src[t] = u
+          src[o] = u
           if not fwd[u] then
-            fwd[u] = t
+            fwd[u] = o
           end
         end
       end
       pending = {}
       if not fwd[cur] then
-        fwd[cur] = t
+        fwd[cur] = o
       end
       cur = cur + 1
+    else
+      table.insert(out, line)
     end
   end
-  return src, fwd, marker
+  return out, src, fwd, marker
 end
 
 local function indent_width(line)
@@ -535,14 +557,15 @@ function M.sync(nwbuf)
     local lines = tangle(nwbuf, root, info.cfg)
     if lines then
       local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
-      sh.src, sh.fwd, sh.marker =
+      local content
+      content, sh.src, sh.fwd, sh.marker =
         parse_maps(lines, info.cfg.leader, srclines)
       local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
-      if not vim.deep_equal(old, lines) then
+      if not vim.deep_equal(old, content) then
         -- the preview marks the shadow nomodifiable; lift it briefly
         local mod = vim.bo[sh.buf].modifiable
         vim.bo[sh.buf].modifiable = true
-        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, lines)
+        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, content)
         vim.bo[sh.buf].modifiable = mod
       end
       forward_diagnostics(nwbuf, sh)
@@ -728,16 +751,17 @@ function M.make(cmd)
   local nwfile = vim.api.nvim_buf_get_name(nwbuf)
   local tmp = vim.fn.tempname() .. (sh.root:match('%.%w+$') or '')
   local tangle = vim.system({ 'sh', '-c', string.format(
-    'notangle %s -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    'notangle %s -filter "linemark %s-c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
     table.concat(sh.cfg.tangle or {}, ' '),
-    sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
+    eager_flag(), sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
   if tangle.code ~= 0 and vim.fn.getfsize(tmp) <= 0 then
     vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
       vim.log.levels.ERROR)
     return
   end
   vim.fn.writefile(
-    rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader), tmp)
+    (parse_maps(rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader),
+                sh.cfg.leader, {})), tmp)
   local run = vim.system(
     { 'sh', '-c', 'nolinemap ' .. cmd:gsub('%%', tmp) .. ' 2>&1' },
     { text = true }):wait()

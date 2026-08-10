@@ -1975,6 +1975,8 @@ local state = {}
 
 <<shadow: rejoin mid-line splices>>
 
+<<shadow: request eager markers>>
+
 <<shadow: tangle one root with markers>>
 
 <<shadow: parse the markers into line maps>>
@@ -2200,7 +2202,7 @@ local function tangle(nwbuf, root, cfg)
   local argv = { 'notangle' }
   vim.list_extend(argv, cfg.tangle or {})
   vim.list_extend(argv, {
-    '-filter', "linemark -c '" .. cfg.leader .. "'",
+    '-filter', 'linemark ' .. eager_flag() .. "-c '" .. cfg.leader .. "'",
     '-R' .. root,
   })
   local res = vim.system(argv,
@@ -2259,6 +2261,34 @@ The relocated marker also keeps the tangle self-describing for
 markers when [[:NowebMake]] runs a compiler over it
 (\cref{sec:nowebmake}).
 
+Newer linemark, prompted by this very repair, defaults to a
+\emph{safe} placement that never breaks a spliced line: a chunk's
+first marker follows its first line, and no marker lands after a
+backslash-continued one.  Good for raw consumers, but the safety is
+bought with anchoring---lines skipped over anchor across the splice
+by counting, and a continuation-heavy chunk like edumail's grep
+pipeline would lose the exact per-line map the repair recovers.
+Since we \emph{are} a consumer that repairs junctions, the shadows
+ask linemark for the old placement with [[-e]]: every marker
+present, every line anchored, every break mended here.  Whether the
+installed linemark knows the flag is probed once, by tangling a
+one-chunk document through it; an older linemark fails the probe
+and is simply eager by default, so both answers lead to the same
+stream.
+
+<<shadow: request eager markers>>=
+local eager
+local function eager_flag()
+  if eager == nil then
+    local res = vim.system(
+      { 'notangle', '-filter', 'linemark -e', '-Rprobe' },
+      { stdin = '@<<probe@>>=\nx\n@\n', text = true }):wait(2000)
+    eager = (res and res.code == 0) and '-e ' or ''
+  end
+  return eager
+end
+@
+
 <<shadow: rejoin mid-line splices>>=
 local function display_width(s)
   local w = 0
@@ -2312,6 +2342,18 @@ lines count up until the next marker.  After the rejoining above,
 every marker stands on a line of its own.  Markers are indented
 with their splice, hence the leading-whitespace allowance.
 
+The parser also decides which markers may \emph{stay} in the text.
+Eager linemark marks every discontinuity, including one it cannot
+mark safely: a re-anchor after a use line ending in a backslash
+lands between that line and its continuation, severing them.  (This
+also lurked, unrepaired, in the shadows of earlier versions.)  Such
+a marker is left out of the shadow text---the continuation stays
+whole---but its announcement still anchors the map, which is the
+whole point of asking for eager markers: the information arrives
+even where the comment cannot.  The function therefore returns the
+buffer content alongside the maps, with [[src]], [[fwd]] and
+[[marker]] keyed by the lines the buffer actually gets.
+
 One refinement, and it is what makes the maps usable around
 mid-line uses.  A marker that interrupts the running count marks a
 chunk use, and the source line it interrupted---the use line---may
@@ -2359,7 +2401,7 @@ end
 
 local function parse_maps(lines, leader, srclines)
   local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
-  local src, fwd, marker = {}, {}, {}
+  local out, src, fwd, marker = {}, {}, {}, {}
   local cur = nil
   local pending = {}
   for t, line in ipairs(lines) do
@@ -2369,26 +2411,37 @@ local function parse_maps(lines, leader, srclines)
         table.insert(pending, cur)
       end
       cur = tonumber(announced)
-      marker[t] = true
-      src[t] = cur
+      local prev = out[#out]
+      if not (prev and prev:match('\\$')) then
+        -- a marker after a backslash-continued line would sever the
+        -- continuation: leave it out of the text, keep its
+        -- announcement for the map
+        table.insert(out, line)
+        marker[#out] = true
+        src[#out] = cur
+      end
     elseif cur then
-      src[t] = cur
+      table.insert(out, line)
+      local o = #out
+      src[o] = cur
       for _, u in ipairs(pending) do
         if use_lives_on(srclines[u], lines[t + 1], pat) then
-          src[t] = u
+          src[o] = u
           if not fwd[u] then
-            fwd[u] = t
+            fwd[u] = o
           end
         end
       end
       pending = {}
       if not fwd[cur] then
-        fwd[cur] = t
+        fwd[cur] = o
       end
       cur = cur + 1
+    else
+      table.insert(out, line)
     end
   end
-  return src, fwd, marker
+  return out, src, fwd, marker
 end
 @
 
@@ -2516,14 +2569,15 @@ function M.sync(nwbuf)
     local lines = tangle(nwbuf, root, info.cfg)
     if lines then
       local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
-      sh.src, sh.fwd, sh.marker =
+      local content
+      content, sh.src, sh.fwd, sh.marker =
         parse_maps(lines, info.cfg.leader, srclines)
       local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
-      if not vim.deep_equal(old, lines) then
+      if not vim.deep_equal(old, content) then
         -- the preview marks the shadow nomodifiable; lift it briefly
         local mod = vim.bo[sh.buf].modifiable
         vim.bo[sh.buf].modifiable = true
-        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, lines)
+        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, content)
         vim.bo[sh.buf].modifiable = mod
       end
       forward_diagnostics(nwbuf, sh)
@@ -3168,9 +3222,12 @@ jumps straight into the noweb source.
 The tangle here reads the \emph{file}, not the buffer: the markers
 must carry the real path for nolinemap's rewriting to name it, so
 the command insists on a saved buffer, exactly like [[:make]].
-The output gets the same mid-line splice repair as the shadows,
-so the compiler sees the real program; the relocated markers are
-whole-line comments nolinemap reads exactly as we do.
+The output gets the same repairs as the shadows---junctions
+rejoined, continuation-severing markers dropped---so the compiler
+sees the real program; the markers that remain are whole-line
+comments nolinemap reads exactly as we do (a dropped marker costs
+nolinemap some precision around that splice, the price of handing
+it valid code).
 
 <<shadow: quickfix through nolinemap>>=
 function M.make(cmd)
@@ -3190,16 +3247,17 @@ function M.make(cmd)
   local nwfile = vim.api.nvim_buf_get_name(nwbuf)
   local tmp = vim.fn.tempname() .. (sh.root:match('%.%w+$') or '')
   local tangle = vim.system({ 'sh', '-c', string.format(
-    'notangle %s -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    'notangle %s -filter "linemark %s-c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
     table.concat(sh.cfg.tangle or {}, ' '),
-    sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
+    eager_flag(), sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
   if tangle.code ~= 0 and vim.fn.getfsize(tmp) <= 0 then
     vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
       vim.log.levels.ERROR)
     return
   end
   vim.fn.writefile(
-    rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader), tmp)
+    (parse_maps(rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader),
+                sh.cfg.leader, {})), tmp)
   local run = vim.system(
     { 'sh', '-c', 'nolinemap ' .. cmd:gsub('%%', tmp) .. ' 2>&1' },
     { text = true }):wait()
