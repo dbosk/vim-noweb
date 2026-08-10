@@ -2576,6 +2576,12 @@ answering for the line they announce.  Prose lines belong to no
 shadow, so the preview simply stays put while the cursor crosses
 them.
 
+The split obeys the usual command modifiers: plain [[:NowebTangled]]
+opens below ([[g:noweb_tangled_split]] changes that default), and
+[[:vertical NowebTangled]], [[:botright NowebTangled]] and friends
+do what they say---the modifiers, when given, replace the default
+wholesale.
+
 Two details keep the lockstep calm.  Cursor moves made with
 [[nvim_win_set_cursor]] into a \emph{non-current} window do not fire
 that window's [[CursorMoved]], so the two autocommands cannot
@@ -2649,7 +2655,7 @@ function M.roots()
   return out
 end
 
-function M.preview(root)
+function M.preview(root, mods)
   local nwbuf = vim.api.nvim_get_current_buf()
   if preview[nwbuf] then
     preview_close(nwbuf)
@@ -2667,7 +2673,11 @@ function M.preview(root)
     return
   end
   local nwwin = vim.api.nvim_get_current_win()
-  vim.cmd('rightbelow vsplit')
+  if mods and mods ~= '' then
+    vim.cmd(mods .. ' split')
+  else
+    vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
+  end
   local pwin = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(pwin, sh.buf)
   vim.wo[pwin].cursorline = true
@@ -2796,7 +2806,8 @@ if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
   lua require('noweb.shadow').setup(0)
   command! -buffer -nargs=? -complete=customlist,noweb#tangled_roots
         \ NowebTangled
-        \ call luaeval('require("noweb.shadow").preview(_A)', <q-args>)
+        \ call luaeval('require("noweb.shadow").preview(_A[1], _A[2])',
+        \              [<q-args>, <q-mods>])
   command! -buffer -nargs=+ NowebMake
         \ call luaeval('require("noweb.shadow").make(_A)', <q-args>)
   let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebTangled'

@@ -374,7 +374,7 @@ function M.roots()
   return out
 end
 
-function M.preview(root)
+function M.preview(root, mods)
   local nwbuf = vim.api.nvim_get_current_buf()
   if preview[nwbuf] then
     preview_close(nwbuf)
@@ -392,7 +392,11 @@ function M.preview(root)
     return
   end
   local nwwin = vim.api.nvim_get_current_win()
-  vim.cmd('rightbelow vsplit')
+  if mods and mods ~= '' then
+    vim.cmd(mods .. ' split')
+  else
+    vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
+  end
   local pwin = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(pwin, sh.buf)
   vim.wo[pwin].cursorline = true

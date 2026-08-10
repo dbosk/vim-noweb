@@ -64,7 +64,9 @@ Results map back into the noweb source:
   landing in the right chunk of the `.nw`, even across chunks;
 - **`:NowebTangled`** opens the tangled code read-only in a split,
   cursor-synced in both directions with the source (toggle to
-  close);
+  close).  Horizontal below by default; `:vert NowebTangled` (and
+  the other split modifiers) work as usual, and
+  `g:noweb_tangled_split` changes the default;
 - **`:NowebMake {cmd}`** tangles the root under the cursor, runs
   `{cmd}` (`%` = the tangled file) through noweb's `nolinemap`, and
   fills the quickfix list with positions in the `.nw`.
