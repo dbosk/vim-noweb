@@ -1970,16 +1970,53 @@ return M
 Languages are described by a comment leader (for linemark), a
 filetype (set on the shadow buffer: it names the language to the LSP
 client and lets that language's own plugins---lean.nvim, for
-one---attach their machinery), and optionally a language-server
-command.  The keys are Vim syntax names, the same names the language
-inference produces.  [[g:noweb_languages]] extends or overrides the
-defaults.
+one---attach their machinery), optionally a language-server command,
+and definition patterns for the serverless [[gd]]
+(\cref{sec:hoverdef}).  The keys are Vim syntax names, the same
+names the language inference produces.  [[g:noweb_languages]]
+extends or overrides the defaults.
+
+The default set mirrors the languages noweb itself ships
+\texttt{-autodefs} filters for, and each [[definitions]] list ports
+the corresponding recognizer's rules (their sources live in the
+fork's \texttt{src/icon/*defs.nw}): C and C++ dispatch on
+declaration keywords, macros and the left-margin function form (C++
+adding classes, namespaces and [[Foo::bar]]-qualified members),
+Haskell on type signatures and left-margin equations, Rust and Java
+on their declaration keywords, \TeX{} on [[\def]] and the
+[[\newcommand]] family, Icon on procedures and records, Pascal on
+its (case-folded) routine keywords, yacc on grammar rules and
+declarations.  The shell entry serves [[zsh]] too, as noweb's bash
+autodefs serves the whole family.  Three autodefs languages are
+deliberately absent: SML and Promela have no line comment for the
+markers (linemark's custom format could carry a block comment; not
+wired yet), and asdl, lrtl and mmix are one configuration line away
+for whoever tangles them.
 
 <<shadow: language configuration>>=
 -- A language without an lsp entry still earns its shadow: the
 -- preview, :NowebMake and the pattern-based gd all work for any
 -- typed root.  definitions are Lua patterns over tangled lines;
--- @NAME@ stands for the (escaped) identifier.
+-- @NAME@ stands for the (escaped) identifier.  The default language
+-- set mirrors the languages noweb ships autodefs filters for, and
+-- the patterns port each recognizer's rules.
+local sh_definitions = { '^%s*@NAME@%s*%(%s*%)',
+                         '^%s*function%s+@NAME@%f[%W]',
+                         '^%s*@NAME@=', '^%s*@NAME@%+=',
+                         '^%s*local%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*export%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*typeset%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*declare%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*readonly%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '%f[%w]for%s+@NAME@%f[%W]',
+                         '%f[%w]read%s+@NAME@%f[%W]',
+                         '%f[%w]@NAME@=', '%f[%w]@NAME@%+=' }
+local c_definitions = { '^%s*#%s*define%s+@NAME@%f[%W]',
+                        '^[%w_][%w_%s%*&<>,:]-%f[%w]@NAME@%s*%(',
+                        '%f[%w]struct%s+@NAME@%f[%W]',
+                        '%f[%w]enum%s+@NAME@%f[%W]',
+                        '%f[%w]union%s+@NAME@%f[%W]',
+                        '%f[%w]typedef[^;]*%f[%w]@NAME@%s*;' }
 local defaults = {
   python = { leader = '#', filetype = 'python',
              lsp = { 'jedi-language-server' },
@@ -1998,21 +2035,69 @@ local defaults = {
                              'local%s+@NAME@%f[%W]',
                              '^%s*@NAME@%s*=',
                              '%f[%w]for%s+@NAME@%f[%W]' } },
-  sh     = { leader = '#', filetype = 'sh',
-             definitions = { '^%s*@NAME@%s*%(%s*%)',
-                             '^%s*function%s+@NAME@%f[%W]',
-                             '^%s*@NAME@=', '^%s*@NAME@%+=',
-                             '^%s*local%s[^=]*%f[%w]@NAME@%f[%W]',
-                             '^%s*export%s[^=]*%f[%w]@NAME@%f[%W]',
-                             '^%s*typeset%s[^=]*%f[%w]@NAME@%f[%W]',
-                             '^%s*declare%s[^=]*%f[%w]@NAME@%f[%W]',
-                             '^%s*readonly%s[^=]*%f[%w]@NAME@%f[%W]',
-                             '%f[%w]for%s+@NAME@%f[%W]',
-                             '%f[%w]read%s+@NAME@%f[%W]',
-                             '%f[%w]@NAME@=', '%f[%w]@NAME@%+=' } },
+  sh     = { leader = '#', filetype = 'sh', definitions = sh_definitions },
+  zsh    = { leader = '#', filetype = 'zsh', definitions = sh_definitions },
   make   = { leader = '#', filetype = 'make',
              definitions = { '^@NAME@%s*:' } },
+  c      = { leader = '//', filetype = 'c', definitions = c_definitions },
+  cpp    = { leader = '//', filetype = 'cpp',
+             definitions = vim.list_extend(
+               { '%f[%w]class%s+@NAME@%f[%W]',
+                 '%f[%w]namespace%s+@NAME@%f[%W]',
+                 '%f[%w][%w_]+::@NAME@%s*%(' },
+               c_definitions) },
+  haskell = { leader = '--', filetype = 'haskell',
+              definitions = { '^@NAME@%s*::', '^@NAME@[%s,].*::',
+                              '%f[%w]data%s+@NAME@%f[%W]',
+                              '%f[%w]newtype%s+@NAME@%f[%W]',
+                              '%f[%w]type%s+@NAME@%f[%W]',
+                              '%f[%w]class%s+@NAME@%f[%W]',
+                              '^@NAME@%f[%W]' } },
+  java   = { leader = '//', filetype = 'java',
+             definitions = { '%f[%w]class%s+@NAME@%f[%W]',
+                             '%f[%w]interface%s+@NAME@%f[%W]',
+                             '%f[%w]enum%s+@NAME@%f[%W]',
+                             '%f[%w]record%s+@NAME@%f[%W]',
+                             '^%s*[%w<>%[%],%s]-%f[%w]@NAME@%s*%(',
+                             '^%s*[%w<>%[%],%s]-%f[%w]@NAME@%s*[=;]' } },
+  rust   = { leader = '//', filetype = 'rust',
+             definitions = { '%f[%w]fn%s+@NAME@%f[%W]',
+                             '%f[%w]struct%s+@NAME@%f[%W]',
+                             '%f[%w]enum%s+@NAME@%f[%W]',
+                             '%f[%w]trait%s+@NAME@%f[%W]',
+                             '%f[%w]mod%s+@NAME@%f[%W]',
+                             '%f[%w]union%s+@NAME@%f[%W]',
+                             '%f[%w]type%s+@NAME@%f[%W]',
+                             '%f[%w]const%s+@NAME@%f[%W]',
+                             '%f[%w]static%s+@NAME@%f[%W]',
+                             '%f[%w]let%s+@NAME@%f[%W]',
+                             '%f[%w]let%s+mut%s+@NAME@%f[%W]',
+                             'macro_rules!%s*@NAME@%f[%W]' } },
+  tex    = { leader = '%', filetype = 'tex',
+             definitions = { '\\def%s*\\@NAME@%f[%W]',
+                             '\\newcommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\renewcommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\providecommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\newenvironment%s*{@NAME@}',
+                             '\\newtheorem%s*{@NAME@}' } },
+  icon   = { leader = '#', filetype = 'icon',
+             definitions = { '%f[%w]procedure%s+@NAME@%f[%W]',
+                             '%f[%w]record%s+@NAME@%f[%W]',
+                             '%f[%w]global%s[%w%s,]-%f[%w]@NAME@%f[%W]' } },
+  pascal = { leader = '//', filetype = 'pascal',
+             definitions = { '%f[%w][Pp]rocedure%s+@NAME@%f[%W]',
+                             '%f[%w][Ff]unction%s+@NAME@%f[%W]',
+                             '%f[%w][Cc]onstructor%s+@NAME@%f[%W]',
+                             '^%s*@NAME@%s*=',
+                             '^%s*@NAME@%s*:' } },
+  yacc   = { leader = '//', filetype = 'yacc',
+             definitions = { '^@NAME@%s*:',
+                             '^%%token[%w%s<>%.]-%f[%w]@NAME@%f[%W]',
+                             '^%%type[%w%s<>%.]-%f[%w]@NAME@%f[%W]' } },
 }
+-- The filetype database answers 'plaintex' for a bare .tex name.
+defaults.plaintex = vim.tbl_extend('force', defaults.tex,
+                                   { filetype = 'plaintex' })
 
 local function language_config()
   return vim.tbl_deep_extend('force', defaults, vim.g.noweb_languages or {})

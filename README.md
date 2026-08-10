@@ -81,6 +81,12 @@ treatment when VimTeX is installed: motions, text objects, TOC, and
 `\cite`/`\ref` completion routed through the same omnifunc.  Set
 `g:noweb_vimtex = 0` to opt out.
 
+Out of the box the shadow machinery covers the languages noweb
+ships `autodefs` filters for — Python (with jedi-language-server),
+shell (sh/zsh/bash), make, C, C++, Haskell, Java, Rust, TeX, Icon,
+Pascal, yacc — plus Lua and Lean; the serverless `gd` patterns port
+each autodefs recognizer's rules.
+
 Chunk languages come from the same inference the `autolang` weave
 filter uses, including its name-pattern rules: chunks named like
 `test [[foo.py]]`, `test [[foo.sh]]` or `test [[Makefile]]` are
