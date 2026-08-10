@@ -250,7 +250,9 @@ ignores it but archaeologists should not have to run [[git log]].
 "       goto-def inside code chunks, mapped back into the .nw; the
 "       omnifunc routes between chunk names, the LSP and VimTeX,
 "       which now initializes for the prose; :NowebTangled lockstep
-"       preview; :NowebMake through nolinemap.
+"       preview; :NowebMake through nolinemap.  Name-pattern language
+"       rules mirror noweave's -langrule (test [[x.py]] chunks etc.;
+"       g:noweb_langrules).
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
@@ -546,6 +548,8 @@ happens to be pedagogical order as well:
 
 <<the [[s:CONFLICT]] sentinel>>
 
+<<the [[s:LANGRULES]] table>>
+
 <<[[s:filetype_match]]>>
 
 <<[[s:detect_in_scratch]]>>
@@ -724,20 +728,53 @@ let s:lexers_by_ext = {
       \ }
 @
 
-The lookup mirrors autolang's [[lexer_for_chunk]]: a chunk name may
-use noweb's [[[[...]]]] quoting and may contain directory separators,
-and only the basename decides---[[@<<src/util.py@>>]] is Python no
-matter where it tangles to.  Note the quote-stripping must come
-first; [[[[Makefile]]]] should be looked up as a basename.  The
-basename, not the full name, also goes to the editor's database: its
-path-based patterns (matching e.g.\ files under [[etc/]]) make no
-sense for chunk names.
+The lookup mirrors autolang's [[lexer_for_chunk]], rule for rule.
+A user-supplied rule matching the \emph{whole} name wins first:
+noweave's [[-langrule 'REGEX=LEXER']] option exists because a name
+like [[test [[clitodo.py]]]]---a label in front of a quoted file
+reference---is neither filename-like as a whole nor reachable by
+propagation (a root is never used), yet its language is plain to a
+human.  The default rules are the ones the makefiles repository's
+default weave passes to noweave, so the editor and the woven
+document agree out of the box; the values are Vim filetype names
+where noweave's are Pygments aliases (Pygments' \enquote{bash} is
+Vim's [[sh]]).  [[g:noweb_langrules]] prepends the user's own pairs of pattern and
+filetype, so they win over the defaults; like autolang's
+[[re.search]], a pattern matches anywhere in the name unless
+anchored.
+
+Otherwise a chunk name may use noweb's [[[[...]]]] quoting and may
+contain directory separators, and only the basename
+decides---[[@<<src/util.py@>>]] is Python no matter where it tangles
+to.  Note the quote-stripping must come first; [[[[Makefile]]]]
+should be looked up as a basename.  The basename, not the full name,
+also goes to the editor's database: its path-based patterns
+(matching e.g.\ files under [[etc/]]) make no sense for chunk names.
+
+<<the [[s:LANGRULES]] table>>=
+" Name-pattern rules, checked before everything else (mirrors
+" autolang's -langrule, values as Vim filetypes).  The defaults track
+" the makefiles repository's default weave; g:noweb_langrules
+" prepends user rules, first match wins.
+let s:LANGRULES = [
+      \ ['^test \[\[.*\.py\]\]', 'python'],
+      \ ['^test \[\[.*\.sh\]\]', 'sh'],
+      \ ['^test \[\[Makefile\]\]', 'make'],
+      \ ]
+@
 
 <<[[s:lexer_for_chunk]]>>=
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
-" The name may use noweb's [[...]] quoting and may contain directory
-" separators; only the basename decides (mirrors lexer_for_chunk).
+" A g:noweb_langrules/s:LANGRULES rule matching the whole name wins;
+" otherwise the name may use noweb's [[...]] quoting and may contain
+" directory separators, and only the basename decides (mirrors
+" autolang's lexer_for_chunk).
 function! s:lexer_for_chunk(name) abort
+  for l:rule in get(g:, 'noweb_langrules', []) + s:LANGRULES
+    if a:name =~# l:rule[0]
+      return l:rule[1]
+    endif
+  endfor
   let l:name = a:name
   if l:name =~# '^\[\[.*\]\]$'
     let l:name = l:name[2:-3]
@@ -1863,6 +1900,12 @@ endfunction
 function! noweb#languages() abort
   return s:infer_languages()
 endfunction
+
+" Command completion for :NowebTangled: the shadow root names.
+function! noweb#tangled_roots(arglead, cmdline, cursorpos) abort
+  return filter(luaeval('require("noweb.shadow").roots()'),
+        \ 'stridx(v:val, a:arglead) >= 0')
+endfunction
 @
 
 \subsection{The shadow module}
@@ -1932,11 +1975,15 @@ inference produces.  [[g:noweb_languages]] extends or overrides the
 defaults.
 
 <<shadow: language configuration>>=
+-- A language without an lsp entry still earns its shadow: the
+-- preview and :NowebMake work for any typed root.
 local defaults = {
   python = { leader = '#', filetype = 'python',
              lsp = { 'jedi-language-server' } },
   lean   = { leader = '--', filetype = 'lean' },
   lua    = { leader = '--', filetype = 'lua' },
+  sh     = { leader = '#', filetype = 'sh' },
+  make   = { leader = '#', filetype = 'make' },
 }
 
 local function language_config()
@@ -2537,9 +2584,16 @@ switching windows mid-update) anyway.  And the command toggles:
 running it again, or closing the preview window, tears the
 autocommands down.
 
-Without an argument the command previews the root whose chunk holds
-the cursor, or the file's only root; with several roots and the
-cursor in prose it asks for a name.
+Naming the root should be forgiving: root chunks are conventionally
+named with [[[[...]]]] quoting, but nobody wants to type brackets on
+a command line, so an argument matches the root name exactly, the
+name with the quoting added, or the name with the quoting stripped
+(the command also completes root names).  Without an argument the
+command previews the root whose tangle holds the cursor line; a
+cursor on a chunk \emph{header} is resolved through the chunk's
+first body line, so \enquote{on a chunk} works the way it reads.
+Failing all that, a single root is used, and with several the error
+lists them.
 
 <<shadow: the synced preview>>=
 local preview = {}  -- preview[nwbuf] = { win, nwwin, sh, group }
@@ -2557,19 +2611,42 @@ local function preview_close(nwbuf)
   end
 end
 
+local function strip_quotes(name)
+  return (name:gsub('%[%[', ''):gsub('%]%]', ''))
+end
+
 local function preview_pick(st, root, lnum)
   if root and root ~= '' then
-    return st.roots[root]
+    if st.roots[root] then
+      return st.roots[root]
+    end
+    for name, sh in pairs(st.roots) do
+      if name == '[[' .. root .. ']]' or strip_quotes(name) == root then
+        return sh
+      end
+    end
+    return nil
   end
   local only, n, holder = nil, 0, nil
-  for _, s in pairs(st.roots) do
+  for _, sh in pairs(st.roots) do
     n = n + 1
-    only = s
-    if s.fwd[lnum] then
-      holder = s
+    only = sh
+    if sh.fwd[lnum] or sh.fwd[lnum + 1] then
+      holder = sh
     end
   end
   return holder or (n == 1 and only or nil)
+end
+
+-- Root names of the current buffer's shadows, for command completion.
+function M.roots()
+  local st = M.sync(vim.api.nvim_get_current_buf())
+  local out = {}
+  for name in pairs(st and st.roots or {}) do
+    table.insert(out, name)
+  end
+  table.sort(out)
+  return out
 end
 
 function M.preview(root)
@@ -2585,8 +2662,8 @@ function M.preview(root)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local sh = preview_pick(st, root, lnum)
   if not sh then
-    vim.notify('noweb: name the root: :NowebTangled <root>',
-      vim.log.levels.WARN)
+    vim.notify('noweb: name the root: :NowebTangled <root>  ('
+      .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
     return
   end
   local nwwin = vim.api.nvim_get_current_win()
@@ -2717,7 +2794,8 @@ back to its v1.6.1 feature set.
 <<start the shadow machinery>>=
 if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
   lua require('noweb.shadow').setup(0)
-  command! -buffer -nargs=? NowebTangled
+  command! -buffer -nargs=? -complete=customlist,noweb#tangled_roots
+        \ NowebTangled
         \ call luaeval('require("noweb.shadow").preview(_A)', <q-args>)
   command! -buffer -nargs=+ NowebMake
         \ call luaeval('require("noweb.shadow").make(_A)', <q-args>)

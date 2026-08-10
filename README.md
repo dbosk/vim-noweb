@@ -74,6 +74,17 @@ treatment when VimTeX is installed: motions, text objects, TOC, and
 `\cite`/`\ref` completion routed through the same omnifunc.  Set
 `g:noweb_vimtex = 0` to opt out.
 
+Chunk languages come from the same inference the `autolang` weave
+filter uses, including its name-pattern rules: chunks named like
+`test [[foo.py]]`, `test [[foo.sh]]` or `test [[Makefile]]` are
+typed by default (matching the makefiles repository's default
+`-langrule` weave flags), and `g:noweb_langrules` prepends your own
+`[pattern, filetype]` pairs — first match wins:
+
+```vim
+let g:noweb_langrules = [['^check \[\[.*\.py\]\]', 'python']]
+```
+
 This needs the `linemark`/`nolinemap` tools from the
 [dbosk/noweb](https://github.com/dbosk/noweb) fork (`contrib/dbosk`)
 on `PATH` alongside `notangle`, and a language server per language:

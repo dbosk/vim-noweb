@@ -17,7 +17,9 @@
 "       goto-def inside code chunks, mapped back into the .nw; the
 "       omnifunc routes between chunk names, the LSP and VimTeX,
 "       which now initializes for the prose; :NowebTangled lockstep
-"       preview; :NowebMake through nolinemap.
+"       preview; :NowebMake through nolinemap.  Name-pattern language
+"       rules mirror noweave's -langrule (test [[x.py]] chunks etc.;
+"       g:noweb_langrules).
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by

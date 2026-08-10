@@ -21,11 +21,15 @@ local state = {}
 -- the autocmd closure in ensure_shadow captures forward_diagnostics
 -- as an upvalue, which requires the local to exist first.
 
+-- A language without an lsp entry still earns its shadow: the
+-- preview and :NowebMake work for any typed root.
 local defaults = {
   python = { leader = '#', filetype = 'python',
              lsp = { 'jedi-language-server' } },
   lean   = { leader = '--', filetype = 'lean' },
   lua    = { leader = '--', filetype = 'lua' },
+  sh     = { leader = '#', filetype = 'sh' },
+  make   = { leader = '#', filetype = 'make' },
 }
 
 local function language_config()
@@ -332,19 +336,42 @@ local function preview_close(nwbuf)
   end
 end
 
+local function strip_quotes(name)
+  return (name:gsub('%[%[', ''):gsub('%]%]', ''))
+end
+
 local function preview_pick(st, root, lnum)
   if root and root ~= '' then
-    return st.roots[root]
+    if st.roots[root] then
+      return st.roots[root]
+    end
+    for name, sh in pairs(st.roots) do
+      if name == '[[' .. root .. ']]' or strip_quotes(name) == root then
+        return sh
+      end
+    end
+    return nil
   end
   local only, n, holder = nil, 0, nil
-  for _, s in pairs(st.roots) do
+  for _, sh in pairs(st.roots) do
     n = n + 1
-    only = s
-    if s.fwd[lnum] then
-      holder = s
+    only = sh
+    if sh.fwd[lnum] or sh.fwd[lnum + 1] then
+      holder = sh
     end
   end
   return holder or (n == 1 and only or nil)
+end
+
+-- Root names of the current buffer's shadows, for command completion.
+function M.roots()
+  local st = M.sync(vim.api.nvim_get_current_buf())
+  local out = {}
+  for name in pairs(st and st.roots or {}) do
+    table.insert(out, name)
+  end
+  table.sort(out)
+  return out
 end
 
 function M.preview(root)
@@ -360,8 +387,8 @@ function M.preview(root)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local sh = preview_pick(st, root, lnum)
   if not sh then
-    vim.notify('noweb: name the root: :NowebTangled <root>',
-      vim.log.levels.WARN)
+    vim.notify('noweb: name the root: :NowebTangled <root>  ('
+      .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
     return
   end
   local nwwin = vim.api.nvim_get_current_win()

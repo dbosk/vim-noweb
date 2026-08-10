@@ -49,7 +49,8 @@ let b:undo_ftplugin .= ' | silent! nunmap <buffer> K'
 
 if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
   lua require('noweb.shadow').setup(0)
-  command! -buffer -nargs=? NowebTangled
+  command! -buffer -nargs=? -complete=customlist,noweb#tangled_roots
+        \ NowebTangled
         \ call luaeval('require("noweb.shadow").preview(_A)', <q-args>)
   command! -buffer -nargs=+ NowebMake
         \ call luaeval('require("noweb.shadow").make(_A)', <q-args>)

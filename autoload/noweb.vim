@@ -45,6 +45,16 @@ let s:interpreters = {
 
 let s:CONFLICT = "\x00conflict\x00"
 
+" Name-pattern rules, checked before everything else (mirrors
+" autolang's -langrule, values as Vim filetypes).  The defaults track
+" the makefiles repository's default weave; g:noweb_langrules
+" prepends user rules, first match wins.
+let s:LANGRULES = [
+      \ ['^test \[\[.*\.py\]\]', 'python'],
+      \ ['^test \[\[.*\.sh\]\]', 'sh'],
+      \ ['^test \[\[Makefile\]\]', 'make'],
+      \ ]
+
 " Ask the editor's filetype database for ARGS, e.g. {'filename': ...}
 " or {'filename': ..., 'contents': [...]}.  Returns '' when there is
 " no answer or no database to ask.
@@ -90,9 +100,16 @@ function! s:detect_in_scratch(args) abort
 endfunction
 
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
-" The name may use noweb's [[...]] quoting and may contain directory
-" separators; only the basename decides (mirrors lexer_for_chunk).
+" A g:noweb_langrules/s:LANGRULES rule matching the whole name wins;
+" otherwise the name may use noweb's [[...]] quoting and may contain
+" directory separators, and only the basename decides (mirrors
+" autolang's lexer_for_chunk).
 function! s:lexer_for_chunk(name) abort
+  for l:rule in get(g:, 'noweb_langrules', []) + s:LANGRULES
+    if a:name =~# l:rule[0]
+      return l:rule[1]
+    endif
+  endfor
   let l:name = a:name
   if l:name =~# '^\[\[.*\]\]$'
     let l:name = l:name[2:-3]
@@ -533,6 +550,12 @@ endfunction
 
 function! noweb#languages() abort
   return s:infer_languages()
+endfunction
+
+" Command completion for :NowebTangled: the shadow root names.
+function! noweb#tangled_roots(arglead, cmdline, cursorpos) abort
+  return filter(luaeval('require("noweb.shadow").roots()'),
+        \ 'stridx(v:val, a:arglead) >= 0')
 endfunction
 
 " K / gd with shadow-LSP answers inside code chunks, falling back to
