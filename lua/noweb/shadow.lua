@@ -183,7 +183,11 @@ function M.sync(nwbuf)
       sh.src, sh.fwd, sh.marker = parse_maps(lines, info.cfg.leader)
       local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
       if not vim.deep_equal(old, lines) then
+        -- the preview marks the shadow nomodifiable; lift it briefly
+        local mod = vim.bo[sh.buf].modifiable
+        vim.bo[sh.buf].modifiable = true
         vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, lines)
+        vim.bo[sh.buf].modifiable = mod
       end
       forward_diagnostics(nwbuf, sh)
     end
@@ -308,6 +312,146 @@ function M.definition()
     end
   end
   return false
+end
+
+local preview = {}  -- preview[nwbuf] = { win, nwwin, sh, group }
+local syncing = false
+
+local function preview_close(nwbuf)
+  local p = preview[nwbuf]
+  if not p then
+    return
+  end
+  preview[nwbuf] = nil
+  pcall(vim.api.nvim_del_augroup_by_id, p.group)
+  if vim.api.nvim_win_is_valid(p.win) then
+    pcall(vim.api.nvim_win_close, p.win, true)
+  end
+end
+
+local function preview_pick(st, root, lnum)
+  if root and root ~= '' then
+    return st.roots[root]
+  end
+  local only, n, holder = nil, 0, nil
+  for _, s in pairs(st.roots) do
+    n = n + 1
+    only = s
+    if s.fwd[lnum] then
+      holder = s
+    end
+  end
+  return holder or (n == 1 and only or nil)
+end
+
+function M.preview(root)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  if preview[nwbuf] then
+    preview_close(nwbuf)
+    return
+  end
+  local st = M.sync(nwbuf)
+  if not st then
+    return
+  end
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = preview_pick(st, root, lnum)
+  if not sh then
+    vim.notify('noweb: name the root: :NowebTangled <root>',
+      vim.log.levels.WARN)
+    return
+  end
+  local nwwin = vim.api.nvim_get_current_win()
+  vim.cmd('rightbelow vsplit')
+  local pwin = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(pwin, sh.buf)
+  vim.wo[pwin].cursorline = true
+  vim.bo[sh.buf].modifiable = false
+  local group = vim.api.nvim_create_augroup('noweb-preview:' .. nwbuf, {})
+  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group }
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      local p = preview[nwbuf]
+      if syncing or not p or not vim.api.nvim_win_is_valid(p.win) then
+        return
+      end
+      local t = p.sh.fwd[vim.api.nvim_win_get_cursor(0)[1]]
+      if t then
+        syncing = true
+        vim.api.nvim_win_set_cursor(p.win, { t, 0 })
+        vim.api.nvim_win_call(p.win, function() vim.cmd('normal! zz') end)
+        syncing = false
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = group,
+    buffer = sh.buf,
+    callback = function()
+      local p = preview[nwbuf]
+      if syncing or not p or not vim.api.nvim_win_is_valid(p.nwwin) then
+        return
+      end
+      local s = p.sh.src[vim.api.nvim_win_get_cursor(0)[1]]
+      if s then
+        syncing = true
+        vim.api.nvim_win_set_cursor(p.nwwin, { s, 0 })
+        vim.api.nvim_win_call(p.nwwin, function() vim.cmd('normal! zz') end)
+        syncing = false
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('WinClosed', {
+    group = group,
+    pattern = tostring(pwin),
+    callback = function()
+      preview_close(nwbuf)
+    end,
+  })
+  local t = sh.fwd[lnum]
+  if t then
+    vim.api.nvim_win_set_cursor(pwin, { t, 0 })
+    vim.api.nvim_win_call(pwin, function() vim.cmd('normal! zz') end)
+  end
+  vim.api.nvim_set_current_win(nwwin)
+end
+
+function M.make(cmd)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  if vim.bo[nwbuf].modified then
+    vim.notify('noweb: save the buffer first; :NowebMake builds the file',
+      vim.log.levels.WARN)
+    return
+  end
+  local st = M.sync(nwbuf)
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = st and preview_pick(st, nil, lnum)
+  if not sh then
+    vim.notify('noweb: no typed root here', vim.log.levels.WARN)
+    return
+  end
+  local nwfile = vim.api.nvim_buf_get_name(nwbuf)
+  local tmp = vim.fn.tempname() .. (sh.root:match('%.%w+$') or '')
+  local tangle = vim.system({ 'sh', '-c', string.format(
+    'notangle -t8 -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
+  if tangle.code ~= 0 then
+    vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
+      vim.log.levels.ERROR)
+    return
+  end
+  local run = vim.system(
+    { 'sh', '-c', 'nolinemap ' .. cmd:gsub('%%', tmp) .. ' 2>&1' },
+    { text = true }):wait()
+  vim.fn.setqflist({}, ' ', {
+    title = 'NowebMake: ' .. cmd,
+    lines = vim.split(run.stdout or '', '\n'),
+    efm = '%*[ ]File "%f"\\, line %l%.%#,'
+      .. '%f:%l:%c: %m,%f:%l: %m,%-G%.%#',
+  })
+  vim.cmd('copen | wincmd p')
 end
 
 function M.setup(nwbuf)
