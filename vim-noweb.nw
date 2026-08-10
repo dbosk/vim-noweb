@@ -73,6 +73,9 @@ The plugin's lineage, version by version:
 \item[v1.6] editing support: chunk names complete and navigate
   through the buffer's own omnifunc and tagfunc
   (\cref{sec:navigation}).
+\item[v1.6.1] the YCM trigger registers at startup rather than at
+  FileType time (\cref{sec:ycmtrigger}); undefined names complete
+  first at definition positions.
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -80,14 +83,16 @@ no code from v1.2 or earlier remains, only the file layout and the
 group names.
 
 Everything in this repository tangles from this file.  The plugin's
-four files are the root chunks, named after their paths in the
+six files are the root chunks, named after their paths in the
 plugin tree:
 
 \begin{itemize}
 \item [[syntax/noweb.vim]],
 \item [[autoload/noweb.vim]],
-\item [[ftdetect/noweb.vim]], and
-\item [[ftplugin/noweb.vim]];
+\item [[ftdetect/noweb.vim]],
+\item [[ftplugin/noweb.vim]],
+\item [[plugin/noweb.vim]], and
+\item [[lua/noweb/scan.lua]];
 \end{itemize}
 
 the [[LICENSE]] tangles from here as well
@@ -109,9 +114,12 @@ here.
 \section{Overview}
 \label{sec:overview}
 
-The plugin is four small files with a one-way control flow:
+The plugin is six small files with a one-way control flow:
 
 \begin{description}
+\item[\texttt{plugin/noweb.vim}] runs once at startup and registers
+  the noweb trigger with YCM before YCM snapshots its options
+  (\cref{sec:ycmtrigger}).
 \item[\texttt{ftdetect/noweb.vim}] tells Vim that [[*.nw]] buffers
   have filetype [[noweb]].
 \item[\texttt{ftplugin/noweb.vim}] runs when that filetype is set and
@@ -129,6 +137,9 @@ The plugin is four small files with a one-way control flow:
   the fallback.  It re-runs on every write, so the highlighting
   follows the file as it evolves.  It also provides the completion
   and navigation functions the ftplugin points at.
+\item[\texttt{lua/noweb/scan.lua}] is the occurrence scan those
+  functions share, in Lua for speed; on Vim a Vim-script fallback in
+  the autoload file takes its place (\cref{sec:luascan}).
 \end{description}
 
 Two invariants make the layering work, and almost every design
@@ -216,7 +227,7 @@ ignores it but archaeologists should not have to run [[git log]].
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-09
-" Version:		1.6
+" Version:		1.6.1
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -224,6 +235,13 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
+"       YCM snapshots its options at VimEnter, so the ftplugin was
+"       too late for files opened mid-session.  Order candidates by
+"       context (undefined names first when defining), memoize the
+"       occurrence scan on b:changedtick and run it in Lua on Neovim
+"       (lua/noweb/scan.lua; 2 ms where Vim script needs 100 on a
+"       15k-line source).
 " v1.6: Editing support: chunk names complete through the buffer's
 "       omnifunc (picked up by YCM and friends), definitions resolve
 "       as tags (CTRL-] jumps, :tnext steps through appends), ]c/[c
@@ -529,6 +547,8 @@ happens to be pedagogical order as well:
 <<[[noweb#refresh]]>>
 
 <<the [[s:DEF]] and [[s:REF]] patterns>>
+
+<<[[s:refs_on_line]]>>
 
 <<[[s:chunk_occurrences]]>>
 
@@ -1162,8 +1182,6 @@ let b:did_ftplugin = 1
 
 <<hook completion and navigation into the buffer>>
 
-<<register the chunk-reference trigger with YCM>>
-
 <<the occurrence maps and the [[:NowebRefs]] command>>
 @
 
@@ -1180,24 +1198,6 @@ let b:undo_ftplugin = 'setlocal omnifunc<'
 if exists('+tagfunc')
   setlocal tagfunc=noweb#tagfunc
   let b:undo_ftplugin .= ' tagfunc<'
-endif
-@
-
-YCM completes through the omnifunc above, but fires it only when the
-typed text matches a per-filetype \emph{trigger sequence}---and it
-has no default trigger for this filetype.  Registering [[@<<]] makes
-the popup appear exactly when a chunk reference begins.  The
-[[has_key]] guard keeps the registration polite: a user who has
-chosen their own trigger, or disabled one, wins.  (Other frameworks
-need no help here: their omnifunc bridges come with their own
-triggering configuration.)
-
-<<register the chunk-reference trigger with YCM>>=
-" YCM fires the omnifunc on a per-filetype trigger sequence and has no
-" default for noweb; register @<< unless the user chose their own.
-let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
-if !has_key(g:ycm_semantic_triggers, 'noweb')
-  let g:ycm_semantic_triggers.noweb = ['@<<']
 endif
 @
 
@@ -1232,6 +1232,61 @@ let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
       \ . ' | silent! delcommand -buffer NowebRefs'
 @
 
+\subsection{Registering the YCM trigger at startup}
+\label{sec:ycmtrigger}
+
+YCM completes through the omnifunc, but fires it only when the typed
+text matches a per-filetype \emph{trigger sequence}---and it has no
+default trigger for this filetype.  Registering [[@<<]] makes the
+popup appear exactly when a chunk reference begins.
+
+Version 1.6 did this registration in the ftplugin, which is subtly
+too late.  YCM sends every [[g:ycm_*]] option to its ycmd server
+\emph{once}, when [[youcompleteme#Enable()]] runs at [[VimEnter]];
+later changes are never seen.  An ftplugin runs when a buffer's
+filetype is set, and for a noweb file opened at startup that is
+before [[VimEnter]]---which made the bug intermittent: chunk
+completion worked in sessions started as \texttt{vim file.nw} and
+silently died for files opened later (what remained was YCM's
+identifier collector, which only re-reads the buffer on events like
+writes, so completion of new chunk names appeared to lag one
+[[:w]] behind).
+
+The registration therefore lives in the plugin's fifth tangled file,
+[[plugin/noweb.vim]]: [[plugin]] files are sourced during startup,
+always before [[VimEnter]], whatever order the plugin manager loads
+them in---YCM defers its [[Enable()]] to [[VimEnter]] precisely so
+that everything else has been sourced by then.  The [[has_key]]
+guard keeps the registration polite: a user who has chosen their own
+trigger, or disabled one, wins.  (Other frameworks need no help
+here: their omnifunc bridges come with their own triggering
+configuration.)
+
+<<[[plugin/noweb.vim]]>>=
+" plugin/noweb.vim -- startup-time configuration for noweb sources
+"
+" Runs before VimEnter, in particular before YCM snapshots its
+" options for the ycmd server; buffer-local setup lives in
+" ftplugin/noweb.vim instead.
+
+if exists('g:loaded_noweb')
+  finish
+endif
+let g:loaded_noweb = 1
+
+<<register the chunk-reference trigger with YCM>>
+@
+
+<<register the chunk-reference trigger with YCM>>=
+" YCM fires the omnifunc on a per-filetype trigger sequence and has no
+" default for noweb; register @<< unless the user chose their own.
+" This must run before VimEnter: YCM reads the option once, at startup.
+let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
+if !has_key(g:ycm_semantic_triggers, 'noweb')
+  let g:ycm_semantic_triggers.noweb = ['@<<']
+endif
+@
+
 \subsection{Scanning for occurrences}
 \label{sec:occurrences}
 
@@ -1251,11 +1306,25 @@ to ignore this; a use edge from a phantom name simply never
 propagates anywhere).  The name may contain blanks, but not start or
 end with one, mirroring noweb's own markup.
 
+Note what the reference pattern does \emph{not} contain: the
+[[@]]-escape exclusion.  Expressing it as look-behinds
+([[@\@1<!]]) reads nicely but pushes Vim's regex engine off its fast
+path; the escape tests are instead two plain string comparisons next
+to each match, in \cref{sec:refsonline}.  The third pattern is the
+scan's skip list: a line can only matter to the scan if it contains
+a bracket pair or starts a text chunk, and [[s:HOT]] matches exactly
+those lines (definition headers contain [[@<<]], so the first
+alternative covers them too).
+
 <<the [[s:DEF]] and [[s:REF]] patterns>>=
-" A chunk definition alone on its line, and a chunk reference whose
-" brackets are not @-escaped; both capture the name via \zs / \ze.
-let s:DEF = '^@<<\zs.\{-}\ze@>>=\s*$'
-let s:REF = '@\@1<!@<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze@\@1<!@>>'
+" A chunk definition (nonempty name) alone on its line, and a chunk
+" reference; both capture the name via \zs / \ze.  The @-escape
+" exclusion is NOT in the reference pattern -- look-behinds are slow
+" -- but tested by s:refs_on_line beside each match.  s:HOT matches
+" every line the occurrence scan cannot skip.
+let s:DEF = '^@<<\zs.\{-1,}\ze@>>=\s*$'
+let s:REF = '@<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze@>>'
+let s:HOT = '@<<\|^@\%( \|$\)'
 @
 
 The scanner is the same state machine as the language scan: a header
@@ -1263,26 +1332,73 @@ enters code mode, a text-chunk marker leaves it, and references are
 collected only \emph{inside} code---in prose, [[@<<...@>>]] is just
 text to noweb, so it must be just text to us.  Each occurrence is a
 (line, column) pair pointing at the first bracket, ready for a jump.
+When does the scan's cost strike?  Only when somebody asks---a
+completion, a tag lookup, an occurrence jump---never on editor
+events; and the scan always reads the live buffer, so unsaved chunks
+are visible the moment they are typed.  A memo on [[b:changedtick]]
+(which Vim bumps on every buffer modification) keeps repeated
+queries from rescanning an unchanged buffer, so the price is one
+rescan per edit-then-query, paid under a completion trigger.  (YCM
+additionally caches the returned candidates for the duration of a
+completion popup, so it asks once per triggered popup, not once per
+keystroke.)  The rescan is deliberately \emph{not} incremental:
+recomputing from scratch cannot go stale, where tracking edited
+regions can.
+
+That leaves making the full pass fast, which is a tale of three
+implementations, benchmarked on the largest noweb source on the
+author's disk (nytid's \texttt{todo.nw}, 15\,000 lines) and on this
+document (1\,700 lines).  A naive Vim-script loop over every line
+costs 43\,ms on this document---not any pattern's fault, but the
+per-statement overhead of an interpreted loop body run 1\,700 times.
+Hopping between candidate lines with [[match()]], which searches a
+list in C, cuts that to 13\,ms---but on the 15\,000-line file still
+costs about 100\,ms, now dominated by [[match()]] recompiling its
+pattern on every call.  Legacy Vim script has nothing faster to
+offer, so the scan does what the language seeding already does
+(\cref{sec:askeditor}): it asks the editor.  On Neovim the scan runs
+in Lua (\cref{sec:luascan})---2\,ms for the 15\,000-line file, about
+4 end-to-end with the result's conversion back to Vim script,
+imperceptible---and the [[match()]] loop remains as the fallback for
+Vim, where the worst noweb sources in practice cost tens of
+milliseconds, once per edit-then-query.
+
+The dispatcher in [[s:chunk_occurrences]] chooses between the two
+and normalizes the Lua result: [[luaeval]] converts an empty Lua table
+to an empty \emph{dictionary}, so a chunk with uses but no
+definitions (or vice versa) would come back with the wrong type
+where a list is expected.  Setting [[g:noweb_scan_vimscript]] forces
+the fallback on Neovim; the test suite uses it to hold the two
+implementations to identical output, and it doubles as an escape
+hatch.
 
 <<[[s:chunk_occurrences]]>>=
 " Scan the buffer and return {chunk name -> {'defs': [...], 'uses': [...]}}
 " where every entry is a [lnum, col] pair (1-based, at the first <).
 " A chunk defined n times has n defs -- appends are definitions too.
+" Memoized on b:changedtick: the scan only re-runs after an edit.
+" On Neovim the scan runs in Lua (lua/noweb/scan.lua); the Vim script
+" loop is the fallback.  Both must produce identical results.
 function! s:chunk_occurrences() abort
-  let l:occ = {}
-  let l:in_code = 0
-  let l:lnum = 0
-  for l:line in getline(1, '$')
-    let l:lnum += 1
-    if l:line =~# s:DEF
-      let l:in_code = 1
-      call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
-    elseif l:in_code && l:line =~# '^@\($\| \)'
-      let l:in_code = 0
-    elseif l:in_code
-      <<record every reference on the line>>
-    endif
-  endfor
+  if get(b:, 'noweb_occ_tick', -1) == b:changedtick
+    return b:noweb_occ
+  endif
+  if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
+    let l:occ = luaeval('require("noweb.scan")()')
+    " luaeval turns an empty Lua table into a dict; lists are expected.
+    for l:e in values(l:occ)
+      if type(l:e.defs) == v:t_dict
+        let l:e.defs = []
+      endif
+      if type(l:e.uses) == v:t_dict
+        let l:e.uses = []
+      endif
+    endfor
+  else
+    <<scan the buffer in Vim script>>
+  endif
+  let b:noweb_occ = l:occ
+  let b:noweb_occ_tick = b:changedtick
   return l:occ
 endfunction
 
@@ -1294,21 +1410,72 @@ function! s:entry(occ, name) abort
 endfunction
 @
 
-[[matchstrpos]] returns the matched name with its start and end;
-[[\zs]] puts the start two bytes past the opening bracket, hence the
-arithmetic when recording the bracket's own column and when resuming
-the scan past the closing pair.
+\subsubsection{The scan in Vim script}
+\label{sec:vimscan}
+
+The fallback does not step through the buffer line by line: it asks
+[[match()]] for the next line matching [[s:HOT]]---that search runs
+in C---and interprets Vim script only on the lines that can matter.
+Skipped lines cannot change the state machine's state, by
+construction of [[s:HOT]].
+
+<<scan the buffer in Vim script>>=
+let l:occ = {}
+let l:lines = getline(1, '$')
+let l:in_code = 0
+let l:i = match(l:lines, s:HOT)
+while l:i >= 0
+  let l:line = l:lines[l:i]
+  let l:lnum = l:i + 1
+  if l:line =~# s:DEF
+    let l:in_code = 1
+    call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
+  elseif l:line =~# '^@\%( \|$\)'
+    let l:in_code = 0
+  elseif l:in_code
+    <<record every reference on the line>>
+  endif
+  let l:i = match(l:lines, s:HOT, l:i + 1)
+endwhile
+@
+
+A code line reaching the reference branch is known to contain a
+bracket pair---that is what put it on the hot list.
 
 <<record every reference on the line>>=
-let l:start = 0
-while 1
-  let l:mp = matchstrpos(l:line, s:REF, l:start)
-  if l:mp[1] < 0
-    break
-  endif
-  call add(s:entry(l:occ, l:mp[0]).uses, [l:lnum, l:mp[1] - 1])
-  let l:start = l:mp[2] + 2
-endwhile
+for l:ref in s:refs_on_line(l:line)
+  call add(s:entry(l:occ, l:ref[0]).uses, [l:lnum, l:ref[1] - 1])
+endfor
+@
+
+\subsubsection{References on one line}
+\label{sec:refsonline}
+
+[[matchstrpos]] returns the matched name with its start and end;
+[[\zs]] puts the start two bytes past the opening bracket, hence the
+arithmetic when checking the byte before the brackets and when
+resuming the scan past the closing pair.  A match is discarded as
+escaped when a [[@]] precedes its opening bracket or ends its
+name (the latter means the closing bracket was escaped, [[@@>>]]).
+
+<<[[s:refs_on_line]]>>=
+" Chunk references on one line as [name, start, end] triples, with
+" 0-based byte indices of the name between the brackets.  The @-escape
+" tests live here as string comparisons; see s:REF.
+function! s:refs_on_line(line) abort
+  let l:refs = []
+  let l:start = 0
+  while 1
+    let l:mp = matchstrpos(a:line, s:REF, l:start)
+    if l:mp[1] < 0
+      return l:refs
+    endif
+    if (l:mp[1] < 3 || a:line[l:mp[1] - 3] !=# '@') && l:mp[0][-1:] !=# '@'
+      call add(l:refs, [l:mp[0], l:mp[1], l:mp[2]])
+    endif
+    let l:start = l:mp[2] + 2
+  endwhile
+endfunction
 @
 
 Navigation commands also need to know which chunk the cursor is
@@ -1326,18 +1493,86 @@ function! s:chunk_at_cursor() abort
     return l:name
   endif
   let l:cur = col('.') - 1
-  let l:start = 0
-  while 1
-    let l:mp = matchstrpos(l:line, s:REF, l:start)
-    if l:mp[1] < 0
-      return ''
+  for l:ref in s:refs_on_line(l:line)
+    if l:cur >= l:ref[1] - 2 && l:cur < l:ref[2] + 2
+      return l:ref[0]
     endif
-    if l:cur >= l:mp[1] - 2 && l:cur < l:mp[2] + 2
-      return l:mp[0]
-    endif
-    let l:start = l:mp[2] + 2
-  endwhile
+  endfor
+  return ''
 endfunction
+@
+
+\subsubsection{The scan in Lua}
+\label{sec:luascan}
+
+The Neovim fast path is the plugin's sixth tangled file and its only
+non--Vim-script one: Neovim adds every [[lua/]] directory on the
+runtime path to Lua's module search, so the dispatcher reaches it as
+[[require("noweb.scan")]].  The module returns the scan function
+itself, and [[require]] caches the module, so the file is read once
+per session.
+
+The implementation mirrors \cref{sec:vimscan,sec:refsonline}
+construct for construct---same state machine, same escape and
+name-shape tests, same (line, column) output---and the test suite
+compares the two implementations' output on the same buffer, so they
+cannot drift apart silently.  Two dialect notes.  Lua patterns have
+no alternation, so the skip test is a byte comparison ([[64]] is
+[[@]]) plus a plain-text [[find]].  And Lua's lazy capture
+[[(.-)]] plays the role of Vim's [[\{-}]]; the name-shape
+conditions that Vim's pattern encodes as [[\%([^ ]\|...\)]] are
+plain string tests here.
+
+<<[[lua/noweb/scan.lua]]>>=
+-- lua/noweb/scan.lua -- the occurrence scan, Neovim fast path.
+--
+-- Mirrors the Vim script scan in autoload/noweb.vim construct for
+-- construct; the two must produce identical results (the test suite
+-- compares them).  Returns {name = {defs = {{lnum, col}, ...},
+--                                   uses = {{lnum, col}, ...}}}.
+
+return function()
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local occ = {}
+  local function entry(name)
+    local e = occ[name]
+    if not e then
+      e = { defs = {}, uses = {} }
+      occ[name] = e
+    end
+    return e
+  end
+  local in_code = false
+  for i, line in ipairs(lines) do
+    -- the s:HOT skip test: only @-lines and bracket lines can matter
+    if line:byte(1) == 64 or line:find('@<<', 1, true) then
+      local name = line:match('^@<<(.-)@>>=%s*$')
+      if name and name ~= '' then
+        in_code = true
+        table.insert(entry(name).defs, { i, 1 })
+      elseif line == '@' or line:sub(1, 2) == '@ ' then
+        in_code = false
+      elseif in_code then
+        <<collect the references on the line, in Lua>>
+      end
+    end
+  end
+  return occ
+end
+@
+
+<<collect the references on the line, in Lua>>=
+local init = 1
+while true do
+  local s, e, ref = line:find('@<<(.-)@>>', init)
+  if not s then break end
+  if ref ~= '' and ref:sub(1, 1) ~= ' ' and ref:sub(-1) ~= ' '
+      and ref:sub(-1) ~= '@'
+      and (s == 1 or line:sub(s - 1, s - 1) ~= '@') then
+    table.insert(entry(ref).uses, { i, s })
+  end
+  init = e + 1
+end
 @
 
 \subsection{Completing chunk names}
@@ -1372,6 +1607,16 @@ style, and the [[menu]] column showing \enquote{undefined} against a
 name doubles as typo detection.  Defined chunks show their append
 count instead.
 
+The order is context-dependent.  Completing at a \emph{definition}
+position---the [[@<<]] opens the line---the user is about to define
+or append, and the natural targets are exactly the names used
+somewhere but not yet defined, so those come first; completing a use
+mid-line, the defined names lead.  Both groups are always present,
+alphabetical within.  Plain \texttt{CTRL-X CTRL-O} preserves this
+order exactly; YCM re-ranks candidates with its own fuzzy matcher,
+so there the ordering is best-effort and the [[menu]] tags carry the
+signal instead.
+
 Each candidate closes the reference for you: the inserted text is
 [[name@>>]], unless the character after the cursor is already a
 [[>]].  The popup stays readable through [[abbr]], which is what the
@@ -1380,19 +1625,24 @@ menu displays in place of the [[word]] actually inserted.
 <<collect the matching chunk names>>=
 let l:occ = s:chunk_occurrences()
 let l:close = getline('.')[col('.') - 1] ==# '>' ? '' : '@>>'
-let l:items = []
+" At a definition position (the @<< opens the line) the likely target
+" is a name still lacking its definition; completing a use, defined
+" names lead instead.
+let l:defining = strpart(getline('.'), 0, col('.') - 1) =~# '^@<<[^>]*$'
+let l:defined = []
+let l:undefined = []
 for l:name in sort(keys(l:occ))
   if stridx(l:name, a:base) != 0
     continue
   endif
   let l:n = len(l:occ[l:name].defs)
-  call add(l:items, {
+  call add(l:n == 0 ? l:undefined : l:defined, {
         \ 'word': l:name . l:close,
         \ 'abbr': l:name,
         \ 'menu': l:n == 0 ? 'undefined' : l:n == 1 ? 'def' : 'def+' . (l:n - 1),
         \ })
 endfor
-return l:items
+return l:defining ? l:undefined + l:defined : l:defined + l:undefined
 @
 
 <<[[noweb#complete]]>>=

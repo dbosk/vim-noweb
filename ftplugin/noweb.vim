@@ -15,13 +15,6 @@ if exists('+tagfunc')
   let b:undo_ftplugin .= ' tagfunc<'
 endif
 
-" YCM fires the omnifunc on a per-filetype trigger sequence and has no
-" default for noweb; register << unless the user chose their own.
-let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
-if !has_key(g:ycm_semantic_triggers, 'noweb')
-  let g:ycm_semantic_triggers.noweb = ['<<']
-endif
-
 command! -buffer NowebRefs call noweb#refs()
 
 nnoremap <silent> <Plug>(noweb-next-occurrence)

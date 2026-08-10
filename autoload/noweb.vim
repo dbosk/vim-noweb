@@ -309,37 +309,77 @@ function! noweb#refresh() abort
   syntax sync fromstart
 endfunction
 
-" A chunk definition alone on its line, and a chunk reference whose
-" brackets are not @-escaped; both capture the name via \zs / \ze.
-let s:DEF = '^<<\zs.\{-}\ze>>=\s*$'
-let s:REF = '@\@1<!<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze@\@1<!>>'
+" A chunk definition (nonempty name) alone on its line, and a chunk
+" reference; both capture the name via \zs / \ze.  The @-escape
+" exclusion is NOT in the reference pattern -- look-behinds are slow
+" -- but tested by s:refs_on_line beside each match.  s:HOT matches
+" every line the occurrence scan cannot skip.
+let s:DEF = '^<<\zs.\{-1,}\ze>>=\s*$'
+let s:REF = '<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze>>'
+let s:HOT = '<<\|^@\%( \|$\)'
+
+" Chunk references on one line as [name, start, end] triples, with
+" 0-based byte indices of the name between the brackets.  The @-escape
+" tests live here as string comparisons; see s:REF.
+function! s:refs_on_line(line) abort
+  let l:refs = []
+  let l:start = 0
+  while 1
+    let l:mp = matchstrpos(a:line, s:REF, l:start)
+    if l:mp[1] < 0
+      return l:refs
+    endif
+    if (l:mp[1] < 3 || a:line[l:mp[1] - 3] !=# '@') && l:mp[0][-1:] !=# '@'
+      call add(l:refs, [l:mp[0], l:mp[1], l:mp[2]])
+    endif
+    let l:start = l:mp[2] + 2
+  endwhile
+endfunction
 
 " Scan the buffer and return {chunk name -> {'defs': [...], 'uses': [...]}}
 " where every entry is a [lnum, col] pair (1-based, at the first <).
 " A chunk defined n times has n defs -- appends are definitions too.
+" Memoized on b:changedtick: the scan only re-runs after an edit.
+" On Neovim the scan runs in Lua (lua/noweb/scan.lua); the Vim script
+" loop is the fallback.  Both must produce identical results.
 function! s:chunk_occurrences() abort
-  let l:occ = {}
-  let l:in_code = 0
-  let l:lnum = 0
-  for l:line in getline(1, '$')
-    let l:lnum += 1
-    if l:line =~# s:DEF
-      let l:in_code = 1
-      call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
-    elseif l:in_code && l:line =~# '^@\($\| \)'
-      let l:in_code = 0
-    elseif l:in_code
-      let l:start = 0
-      while 1
-        let l:mp = matchstrpos(l:line, s:REF, l:start)
-        if l:mp[1] < 0
-          break
-        endif
-        call add(s:entry(l:occ, l:mp[0]).uses, [l:lnum, l:mp[1] - 1])
-        let l:start = l:mp[2] + 2
-      endwhile
-    endif
-  endfor
+  if get(b:, 'noweb_occ_tick', -1) == b:changedtick
+    return b:noweb_occ
+  endif
+  if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
+    let l:occ = luaeval('require("noweb.scan")()')
+    " luaeval turns an empty Lua table into a dict; lists are expected.
+    for l:e in values(l:occ)
+      if type(l:e.defs) == v:t_dict
+        let l:e.defs = []
+      endif
+      if type(l:e.uses) == v:t_dict
+        let l:e.uses = []
+      endif
+    endfor
+  else
+    let l:occ = {}
+    let l:lines = getline(1, '$')
+    let l:in_code = 0
+    let l:i = match(l:lines, s:HOT)
+    while l:i >= 0
+      let l:line = l:lines[l:i]
+      let l:lnum = l:i + 1
+      if l:line =~# s:DEF
+        let l:in_code = 1
+        call add(s:entry(l:occ, matchstr(l:line, s:DEF)).defs, [l:lnum, 1])
+      elseif l:line =~# '^@\%( \|$\)'
+        let l:in_code = 0
+      elseif l:in_code
+        for l:ref in s:refs_on_line(l:line)
+	  call add(s:entry(l:occ, l:ref[0]).uses, [l:lnum, l:ref[1] - 1])
+	endfor
+      endif
+      let l:i = match(l:lines, s:HOT, l:i + 1)
+    endwhile
+  endif
+  let b:noweb_occ = l:occ
+  let b:noweb_occ_tick = b:changedtick
   return l:occ
 endfunction
 
@@ -358,17 +398,12 @@ function! s:chunk_at_cursor() abort
     return l:name
   endif
   let l:cur = col('.') - 1
-  let l:start = 0
-  while 1
-    let l:mp = matchstrpos(l:line, s:REF, l:start)
-    if l:mp[1] < 0
-      return ''
+  for l:ref in s:refs_on_line(l:line)
+    if l:cur >= l:ref[1] - 2 && l:cur < l:ref[2] + 2
+      return l:ref[0]
     endif
-    if l:cur >= l:mp[1] - 2 && l:cur < l:mp[2] + 2
-      return l:mp[0]
-    endif
-    let l:start = l:mp[2] + 2
-  endwhile
+  endfor
+  return ''
 endfunction
 
 " Omnifunc completing chunk names after << (:h complete-functions).
@@ -383,19 +418,24 @@ function! noweb#complete(findstart, base) abort
   endif
   let l:occ = s:chunk_occurrences()
   let l:close = getline('.')[col('.') - 1] ==# '>' ? '' : '>>'
-  let l:items = []
+  " At a definition position (the << opens the line) the likely target
+  " is a name still lacking its definition; completing a use, defined
+  " names lead instead.
+  let l:defining = strpart(getline('.'), 0, col('.') - 1) =~# '^<<[^>]*$'
+  let l:defined = []
+  let l:undefined = []
   for l:name in sort(keys(l:occ))
     if stridx(l:name, a:base) != 0
       continue
     endif
     let l:n = len(l:occ[l:name].defs)
-    call add(l:items, {
+    call add(l:n == 0 ? l:undefined : l:defined, {
           \ 'word': l:name . l:close,
           \ 'abbr': l:name,
           \ 'menu': l:n == 0 ? 'undefined' : l:n == 1 ? 'def' : 'def+' . (l:n - 1),
           \ })
   endfor
-  return l:items
+  return l:defining ? l:undefined + l:defined : l:defined + l:undefined
 endfunction
 
 " Tagfunc resolving chunk names: every definition of the chunk is one
