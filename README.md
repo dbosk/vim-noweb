@@ -61,7 +61,10 @@ Results map back into the noweb source:
   (through the same omnifunc, so YCM and friends pick it up; `.`
   triggers it);
 - **`K`** shows hover documentation, **`gd`** jumps to a definition —
-  landing in the right chunk of the `.nw`, even across chunks;
+  landing in the right chunk of the `.nw`, even across chunks.  With
+  no language server, `gd` falls back to language-aware definition
+  patterns over the whole tangle (shell functions, `def`/`class`,
+  make targets, …; tune via `definitions` in `g:noweb_languages`);
 - **`:NowebTangled`** opens the tangled code read-only in a split,
   cursor-synced in both directions with the source (toggle to
   close).  It shows the build artifact — the line-marker comments

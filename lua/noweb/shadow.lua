@@ -23,14 +23,30 @@ local state = {}
 -- preview state precedes sync's view refresh.
 
 -- A language without an lsp entry still earns its shadow: the
--- preview and :NowebMake work for any typed root.
+-- preview, :NowebMake and the pattern-based gd all work for any
+-- typed root.  definitions are Lua patterns over tangled lines;
+-- @NAME@ stands for the (escaped) identifier.
 local defaults = {
   python = { leader = '#', filetype = 'python',
-             lsp = { 'jedi-language-server' } },
-  lean   = { leader = '--', filetype = 'lean' },
-  lua    = { leader = '--', filetype = 'lua' },
-  sh     = { leader = '#', filetype = 'sh' },
-  make   = { leader = '#', filetype = 'make' },
+             lsp = { 'jedi-language-server' },
+             definitions = { '^%s*def%s+@NAME@%s*%(',
+                             '^%s*class%s+@NAME@%f[%W]',
+                             '^@NAME@%s*=' } },
+  lean   = { leader = '--', filetype = 'lean',
+             definitions = { '%f[%w]def%s+@NAME@%f[%W]',
+                             '%f[%w]theorem%s+@NAME@%f[%W]',
+                             '%f[%w]lemma%s+@NAME@%f[%W]',
+                             '%f[%w]structure%s+@NAME@%f[%W]' } },
+  lua    = { leader = '--', filetype = 'lua',
+             definitions = { 'function%s+@NAME@%f[%W]',
+                             'local%s+function%s+@NAME@%f[%W]',
+                             'local%s+@NAME@%s*=' } },
+  sh     = { leader = '#', filetype = 'sh',
+             definitions = { '^%s*@NAME@%s*%(%s*%)',
+                             '^%s*function%s+@NAME@%f[%W]',
+                             '^%s*@NAME@=' } },
+  make   = { leader = '#', filetype = 'make',
+             definitions = { '^@NAME@%s*:' } },
 }
 
 local function language_config()
@@ -465,33 +481,69 @@ end
 function M.definition()
   local nwbuf = vim.api.nvim_get_current_buf()
   local sh, params = cursor_params(nwbuf)
-  if not sh then
-    return false
-  end
-  local results = vim.lsp.buf_request_sync(
-    sh.buf, 'textDocument/definition', params, 3000)
-  for _, res in pairs(results or {}) do
-    local locs = res.result or {}
-    if locs.uri or locs.targetUri then
-      locs = { locs }
-    end
-    for _, loc in ipairs(locs) do
-      local uri = loc.uri or loc.targetUri
-      local range = loc.range or loc.targetSelectionRange
-      vim.cmd([[normal! m']])
-      if uri == vim.uri_from_bufnr(sh.buf) then
-        local nl = sh.src[range.start.line + 1]
-        if nl then
-          local d = col_delta(sh, range.start.line + 1, nwbuf)
-          vim.api.nvim_win_set_cursor(0,
-            { nl, math.max(0, range.start.character - d) })
+  if sh then
+    local results = vim.lsp.buf_request_sync(
+      sh.buf, 'textDocument/definition', params, 3000)
+    for _, res in pairs(results or {}) do
+      local locs = res.result or {}
+      if locs.uri or locs.targetUri then
+        locs = { locs }
+      end
+      for _, loc in ipairs(locs) do
+        local uri = loc.uri or loc.targetUri
+        local range = loc.range or loc.targetSelectionRange
+        vim.cmd([[normal! m']])
+        if uri == vim.uri_from_bufnr(sh.buf) then
+          local nl = sh.src[range.start.line + 1]
+          if nl then
+            local d = col_delta(sh, range.start.line + 1, nwbuf)
+            vim.api.nvim_win_set_cursor(0,
+              { nl, math.max(0, range.start.character - d) })
+            return true
+          end
+        else
+          local client = vim.lsp.get_clients({ bufnr = sh.buf })[1]
+          vim.lsp.util.show_document(loc, client.offset_encoding,
+            { focus = true })
           return true
         end
-      else
-        local client = vim.lsp.get_clients({ bufnr = sh.buf })[1]
-        vim.lsp.util.show_document(loc, client.offset_encoding,
-          { focus = true })
-        return true
+      end
+    end
+  end
+  return M.pattern_definition(nwbuf)
+end
+
+-- The serverless fallback: search the shadow for a line matching one
+-- of the language's definition patterns for the identifier under the
+-- cursor, and jump to its source line in the .nw.
+function M.pattern_definition(nwbuf)
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = M.locate(nwbuf, lnum)
+  if not sh or not sh.cfg.definitions then
+    return false
+  end
+  local name = vim.fn.expand('<cword>')
+  if name == '' then
+    return false
+  end
+  -- pesc's % escapes are themselves magic in a gsub replacement
+  local escaped = vim.pesc(name):gsub('%%', '%%%%')
+  local pats = {}
+  for _, p in ipairs(sh.cfg.definitions) do
+    table.insert(pats, (p:gsub('@NAME@', escaped)))
+  end
+  local lines = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+  for t, line in ipairs(lines) do
+    if not sh.marker[t] and sh.src[t] then
+      for _, pat in ipairs(pats) do
+        local s = line:find(pat)
+        if s then
+          vim.cmd([[normal! m']])
+          local d = col_delta(sh, t, nwbuf)
+          vim.api.nvim_win_set_cursor(0,
+            { sh.src[t], math.max(0, s - 1 - d) })
+          return true
+        end
       end
     end
   end
