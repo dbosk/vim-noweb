@@ -19,7 +19,10 @@
 "       which now initializes for the prose; :NowebTangled lockstep
 "       preview; :NowebMake through nolinemap.  Name-pattern language
 "       rules mirror noweave's -langrule (test [[x.py]] chunks etc.;
-"       g:noweb_langrules).
+"       g:noweb_langrules).  Chunk references highlight inside the
+"       included languages' own constructs (a sh here-doc rule used
+"       to swallow them), and mid-line chunk splices are rejoined so
+"       shadows match the real tangle.
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by

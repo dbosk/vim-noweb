@@ -155,6 +155,51 @@ local function typed_roots(nwbuf)
   return roots
 end
 
+local function display_width(s)
+  local w = 0
+  for i = 1, #s do
+    w = s:byte(i) == 9 and w + 8 - w % 8 or w + 1
+  end
+  return w
+end
+
+local function strip_columns(line, width)
+  local col, i = 0, 1
+  while col < width and i <= #line do
+    local b = line:byte(i)
+    if b == 9 then
+      col = col + 8 - col % 8
+    elseif b == 32 then
+      col = col + 1
+    else
+      break
+    end
+    i = i + 1
+  end
+  return line:sub(i)
+end
+
+local function rejoin_splices(lines, leader)
+  local inline = '^(.-)(' .. vim.pesc(leader) .. ' %d+ "[^"]*")%s*$'
+  local out = {}
+  local i = 1
+  while i <= #lines do
+    local prefix, mark = lines[i]:match(inline)
+    if prefix and prefix:find('%S') and i < #lines then
+      -- A marker spliced into the middle of a line: give it a line
+      -- of its own and mend the line linemark broke, undoing the
+      -- continuation indent notangle added to the second half.
+      table.insert(out, mark)
+      lines[i + 1] = prefix
+        .. strip_columns(lines[i + 1], display_width(prefix))
+    else
+      table.insert(out, lines[i])
+    end
+    i = i + 1
+  end
+  return out
+end
+
 local function tangle(nwbuf, root, cfg)
   local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
   local argv = { 'notangle' }
@@ -165,14 +210,17 @@ local function tangle(nwbuf, root, cfg)
   })
   local res = vim.system(argv,
     { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(5000)
-  if not res or res.code ~= 0 then
+  -- notangle warns and exits non-zero on an undefined chunk, but still
+  -- tangles it as empty; a document in progress keeps its shadows, so
+  -- only a run that produced no output at all counts as failed.
+  if not res or (res.code ~= 0 and (res.stdout or '') == '') then
     return nil
   end
   local out = vim.split(res.stdout or '', '\n')
   if out[#out] == '' then
     table.remove(out)
   end
-  return out
+  return rejoin_splices(out, cfg.leader)
 end
 
 local function parse_maps(lines, leader)
@@ -655,11 +703,13 @@ function M.make(cmd)
     'notangle %s -filter "linemark -c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
     table.concat(sh.cfg.tangle or {}, ' '),
     sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
-  if tangle.code ~= 0 then
+  if tangle.code ~= 0 and vim.fn.getfsize(tmp) <= 0 then
     vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
       vim.log.levels.ERROR)
     return
   end
+  vim.fn.writefile(
+    rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader), tmp)
   local run = vim.system(
     { 'sh', '-c', 'nolinemap ' .. cmd:gsub('%%', tmp) .. ' 2>&1' },
     { text = true }):wait()

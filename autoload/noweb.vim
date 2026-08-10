@@ -312,11 +312,19 @@ function! noweb#refresh() abort
   " Must be (re)defined after every :syntax include above: at the same
   " start position the last-defined item wins (:h syn-priority), which is
   " what lets chunk refs beat e.g. shHereDoc's <<-pattern inside sh chunks.
-  " First/last name chars must be non-space, so `cat <<EOF >> log` stays a
-  " here-doc.  syntax clear keeps the group id (contains= refs stay valid)
-  " while preventing pattern accumulation across refreshes.
+  " containedin= lets that tie happen anywhere inside the included
+  " languages' own items (sh's if-statements, strings, ...), where the
+  " contains= lists of our regions do not reach.  First/last name chars
+  " must be non-space, so `cat <<EOF >> log` stays a here-doc.  syntax
+  " clear keeps the group id (contains= refs stay valid) while preventing
+  " pattern accumulation across refreshes.
   silent! syntax clear nowebChunkRef
-  syntax match nowebChunkRef /<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/ contained contains=nowebTT
+  let l:incl = join(map(sort(filter(values(b:noweb_included),
+        \ 'v:val !=# ""')), '"@" . v:val'), ',')
+  execute 'syntax match nowebChunkRef'
+        \ '/<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/'
+        \ 'contained contains=nowebTT'
+        \ (l:incl ==# '' ? '' : 'containedin=' . l:incl)
 
   " Included syntax files install buffer-global sync rules (pythonSync
   " grouphere on ^def, make's groupthere on ^[^\t#], small minlines) that
