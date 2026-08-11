@@ -76,6 +76,10 @@ The plugin's lineage, version by version:
 \item[v1.6.1] the YCM trigger registers at startup rather than at
   FileType time (\cref{sec:ycmtrigger}); undefined names complete
   first at definition positions.
+\item[v1.7] language intelligence in chunks: invisible tangled
+  shadow buffers with language servers attached, VimTeX for the
+  prose, a lockstep tangled preview and quickfix through
+  nolinemap (\cref{sec:shadow}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -83,7 +87,7 @@ no code from v1.2 or earlier remains, only the file layout and the
 group names.
 
 Everything in this repository tangles from this file.  The plugin's
-six files are the root chunks, named after their paths in the
+seven files are the root chunks, named after their paths in the
 plugin tree:
 
 \begin{itemize}
@@ -91,8 +95,9 @@ plugin tree:
 \item [[autoload/noweb.vim]],
 \item [[ftdetect/noweb.vim]],
 \item [[ftplugin/noweb.vim]],
-\item [[plugin/noweb.vim]], and
-\item [[lua/noweb/scan.lua]];
+\item [[plugin/noweb.vim]],
+\item [[lua/noweb/scan.lua]], and
+\item [[lua/noweb/shadow.lua]];
 \end{itemize}
 
 the [[LICENSE]] tangles from here as well
@@ -114,7 +119,7 @@ here.
 \section{Overview}
 \label{sec:overview}
 
-The plugin is six small files with a one-way control flow:
+The plugin is seven small files with a one-way control flow:
 
 \begin{description}
 \item[\texttt{plugin/noweb.vim}] runs once at startup and registers
@@ -140,6 +145,10 @@ The plugin is six small files with a one-way control flow:
 \item[\texttt{lua/noweb/scan.lua}] is the occurrence scan those
   functions share, in Lua for speed; on Vim a Vim-script fallback in
   the autoload file takes its place (\cref{sec:luascan}).
+\item[\texttt{lua/noweb/shadow.lua}] keeps an invisible tangled
+  buffer per typed root chunk with a language server attached,
+  mapping diagnostics, completions, hovers and definitions back
+  into the [[.nw]] buffer (\cref{sec:shadow}; Neovim only).
 \end{description}
 
 Two invariants make the layering work, and almost every design
@@ -226,8 +235,8 @@ ignores it but archaeologists should not have to run [[git log]].
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-09
-" Version:		1.6.1
+" Date:			2026-08-10
+" Version:		1.7
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -235,6 +244,18 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.7: Language intelligence in chunks (Neovim): invisible tangled
+"       shadow buffers (notangle -filter linemark) with language
+"       servers attached -- diagnostics, completion, K hover and gd
+"       goto-def inside code chunks, mapped back into the .nw; the
+"       omnifunc routes between chunk names, the LSP and VimTeX,
+"       which now initializes for the prose; :NowebTangled lockstep
+"       preview; :NowebMake through nolinemap.  Name-pattern language
+"       rules mirror noweave's -langrule (test [[x.py]] chunks etc.;
+"       g:noweb_langrules).  Chunk references highlight inside the
+"       included languages' own constructs (a sh here-doc rule used
+"       to swallow them), and mid-line chunk splices are rejoined so
+"       shadows match the real tangle.
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
@@ -530,6 +551,8 @@ happens to be pedagogical order as well:
 
 <<the [[s:CONFLICT]] sentinel>>
 
+<<the [[s:LANGRULES]] table>>
+
 <<[[s:filetype_match]]>>
 
 <<[[s:detect_in_scratch]]>>
@@ -548,6 +571,8 @@ happens to be pedagogical order as well:
 
 <<the [[s:DEF]] and [[s:REF]] patterns>>
 
+<<the route between the omnifunc's two calls>>
+
 <<[[s:refs_on_line]]>>
 
 <<[[s:chunk_occurrences]]>>
@@ -561,6 +586,10 @@ happens to be pedagogical order as well:
 <<[[noweb#next_occurrence]]>>
 
 <<[[noweb#refs]]>>
+
+<<[[noweb#occurrences]] and [[noweb#languages]] accessors>>
+
+<<[[noweb#hover]] and [[noweb#definition]]>>
 @
 
 <<autoload file header>>=
@@ -702,20 +731,53 @@ let s:lexers_by_ext = {
       \ }
 @
 
-The lookup mirrors autolang's [[lexer_for_chunk]]: a chunk name may
-use noweb's [[[[...]]]] quoting and may contain directory separators,
-and only the basename decides---[[@<<src/util.py@>>]] is Python no
-matter where it tangles to.  Note the quote-stripping must come
-first; [[[[Makefile]]]] should be looked up as a basename.  The
-basename, not the full name, also goes to the editor's database: its
-path-based patterns (matching e.g.\ files under [[etc/]]) make no
-sense for chunk names.
+The lookup mirrors autolang's [[lexer_for_chunk]], rule for rule.
+A user-supplied rule matching the \emph{whole} name wins first:
+noweave's [[-langrule 'REGEX=LEXER']] option exists because a name
+like [[test [[clitodo.py]]]]---a label in front of a quoted file
+reference---is neither filename-like as a whole nor reachable by
+propagation (a root is never used), yet its language is plain to a
+human.  The default rules are the ones the makefiles repository's
+default weave passes to noweave, so the editor and the woven
+document agree out of the box; the values are Vim filetype names
+where noweave's are Pygments aliases (Pygments' \enquote{bash} is
+Vim's [[sh]]).  [[g:noweb_langrules]] prepends the user's own pairs of pattern and
+filetype, so they win over the defaults; like autolang's
+[[re.search]], a pattern matches anywhere in the name unless
+anchored.
+
+Otherwise a chunk name may use noweb's [[[[...]]]] quoting and may
+contain directory separators, and only the basename
+decides---[[@<<src/util.py@>>]] is Python no matter where it tangles
+to.  Note the quote-stripping must come first; [[[[Makefile]]]]
+should be looked up as a basename.  The basename, not the full name,
+also goes to the editor's database: its path-based patterns
+(matching e.g.\ files under [[etc/]]) make no sense for chunk names.
+
+<<the [[s:LANGRULES]] table>>=
+" Name-pattern rules, checked before everything else (mirrors
+" autolang's -langrule, values as Vim filetypes).  The defaults track
+" the makefiles repository's default weave; g:noweb_langrules
+" prepends user rules, first match wins.
+let s:LANGRULES = [
+      \ ['^test \[\[.*\.py\]\]', 'python'],
+      \ ['^test \[\[.*\.sh\]\]', 'sh'],
+      \ ['^test \[\[Makefile\]\]', 'make'],
+      \ ]
+@
 
 <<[[s:lexer_for_chunk]]>>=
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
-" The name may use noweb's [[...]] quoting and may contain directory
-" separators; only the basename decides (mirrors lexer_for_chunk).
+" A g:noweb_langrules/s:LANGRULES rule matching the whole name wins;
+" otherwise the name may use noweb's [[...]] quoting and may contain
+" directory separators, and only the basename decides (mirrors
+" autolang's lexer_for_chunk).
 function! s:lexer_for_chunk(name) abort
+  for l:rule in get(g:, 'noweb_langrules', []) + s:LANGRULES
+    if a:name =~# l:rule[0]
+      return l:rule[1]
+    endif
+  endfor
   let l:name = a:name
   if l:name =~# '^\[\[.*\]\]$'
     let l:name = l:name[2:-3]
@@ -1109,15 +1171,41 @@ in the syntax file.  The pattern requires non-space first and last
 name characters, so a real redirected here-doc like
 [[cat @<<EOF @>> log]] is left to the shell syntax.
 
+Definition order settles the tie, though, only among items
+\emph{allowed} to match at that spot.  [[contained]] plus the
+regions' [[contains]] lists admits the reference at the top level
+of a chunk---but a reference nested inside one of the language's
+own constructs, say the [[test]] brackets of
+
+\begin{minted}{bash}
+  | if [ @<<test for programming terms@>> ]; then
+\end{minted}
+
+\noindent
+sits where only shell items may match, and the here-doc rule
+swallows the rest of the chunk unopposed.  So the reference is
+also [[containedin]] every included cluster: it may then match
+inside any construct of any included language---strings and
+comments included, which is exactly noweb's semantics, since
+notangle expands a use wherever it stands.
+
 <<redefine [[nowebChunkRef]] after the includes>>=
 " Must be (re)defined after every :syntax include above: at the same
 " start position the last-defined item wins (:h syn-priority), which is
 " what lets chunk refs beat e.g. shHereDoc's @<<-pattern inside sh chunks.
-" First/last name chars must be non-space, so `cat @<<EOF @>> log` stays a
-" here-doc.  syntax clear keeps the group id (contains= refs stay valid)
-" while preventing pattern accumulation across refreshes.
+" containedin= lets that tie happen anywhere inside the included
+" languages' own items (sh's if-statements, strings, ...), where the
+" contains= lists of our regions do not reach.  First/last name chars
+" must be non-space, so `cat @<<EOF @>> log` stays a here-doc.  syntax
+" clear keeps the group id (contains= refs stay valid) while preventing
+" pattern accumulation across refreshes.
 silent! syntax clear nowebChunkRef
-syntax match nowebChunkRef /@<<\%([^ ]\|[^ ].\{-}[^ ]\)@>>/ contained contains=nowebTT
+let l:incl = join(map(sort(filter(values(b:noweb_included),
+      \ 'v:val !=# ""')), '"@" . v:val'), ',')
+execute 'syntax match nowebChunkRef'
+      \ '/@<<\%([^ ]\|[^ ].\{-}[^ ]\)@>>/'
+      \ 'contained contains=nowebTT'
+      \ (l:incl ==# '' ? '' : 'containedin=' . l:incl)
 @
 
 Finally, the sync policy.  This line is the single biggest reliability
@@ -1183,6 +1271,12 @@ let b:did_ftplugin = 1
 <<hook completion and navigation into the buffer>>
 
 <<the occurrence maps and the [[:NowebRefs]] command>>
+
+<<the hover and definition maps>>
+
+<<start the shadow machinery>>
+
+<<initialize VimTeX for the prose>>
 @
 
 [[b:undo_ftplugin]] is the ftplugin counterpart of the syntax file's
@@ -1278,12 +1372,17 @@ let g:loaded_noweb = 1
 @
 
 <<register the chunk-reference trigger with YCM>>=
-" YCM fires the omnifunc on a per-filetype trigger sequence and has no
-" default for noweb; register @<< unless the user chose their own.
+" YCM fires the omnifunc on per-filetype trigger sequences and has no
+" default for noweb; register ours unless the user chose their own.
 " This must run before VimEnter: YCM reads the option once, at startup.
+" @<< opens a chunk reference, . fires the language servers behind the
+" shadow tangles, and VimTeX's own trigger regex covers the prose
+" (accessing the autoload variable loads it; silent! tolerates a
+" missing VimTeX).
 let g:ycm_semantic_triggers = get(g:, 'ycm_semantic_triggers', {})
 if !has_key(g:ycm_semantic_triggers, 'noweb')
-  let g:ycm_semantic_triggers.noweb = ['@<<']
+  let g:ycm_semantic_triggers.noweb = ['@<<', '.']
+  silent! let g:ycm_semantic_triggers.noweb += [g:vimtex#re#youcompleteme]
 endif
 @
 
@@ -1587,18 +1686,13 @@ all---an identifier-based engine can never see past a space, which
 is precisely why YCM's default identifier collector is no help for
 chunk names and the omnifunc route is worth a section of its own.
 
-Completion begins right after the last unescaped [[@<<]] before the
-cursor.  If a [[>]] already intervenes, the reference is closed and
-we are past it: returning $-3$ cancels quietly instead of beeping.
-
-<<find the start of the chunk name being completed>>=
-let l:before = strpart(getline('.'), 0, col('.') - 1)
-let l:start = matchend(l:before, '.*@\@1<!@<<')
-if l:start < 0 || stridx(l:before, '>', l:start) >= 0
-  return -3
-endif
-return l:start
-@
+Chunk-name completion begins right after the last unescaped [[@<<]]
+before the cursor, provided no [[>]] intervenes (then the reference
+is closed and we are past it).  Since v1.7 that is only the first of
+three completion \emph{routes} the omnifunc serves---the other two
+hand the request to a language server or to VimTeX
+(\cref{sec:router})---so the test moved into the router; this
+subsection owns the chunk-name route only.
 
 The candidates are every known chunk name---defined ones and
 referenced-but-undefined ones alike.  Offering the undefined ones is
@@ -1646,12 +1740,15 @@ return l:defining ? l:undefined + l:defined : l:defined + l:undefined
 @
 
 <<[[noweb#complete]]>>=
-" Omnifunc completing chunk names after @<< (:h complete-functions).
+" Omnifunc routing by context (:h complete-functions): chunk names
+" after @<<, the shadow's language server inside a code chunk,
+" VimTeX in prose.  See the routing chunks in the language-
+" intelligence section.
 function! noweb#complete(findstart, base) abort
   if a:findstart
-    <<find the start of the chunk name being completed>>
+    <<route the completion and find its start>>
   endif
-  <<collect the matching chunk names>>
+  <<produce the candidates for the routed target>>
 endfunction
 @
 
@@ -1766,6 +1863,1433 @@ function! s:no_chunk() abort
   echomsg 'noweb: no chunk name under the cursor'
   echohl None
 endfunction
+@
+
+\section{Language intelligence in chunks}
+\label{sec:shadow}
+
+Completion and navigation (\cref{sec:navigation}) understand noweb's
+\emph{structure}; this section is about understanding the
+\emph{languages}.  A Python chunk should get Python diagnostics,
+completion, hover documentation and goto-definition---the things a
+language server provides---and the prose should get a full \TeX{}
+toolchain.  The plugin cannot reimplement any of that, and following
+the by now familiar principle, it does not try: it arranges for the
+tools that already exist to see the code they expect.
+
+The arrangement is an \emph{invisible tangled buffer} per root
+chunk: a hidden buffer holding the real tangled program, kept in
+sync with the noweb source, with a language server attached to it.
+Every query---diagnostics, completion, a definition lookup---runs
+against the shadow buffer, and every result is mapped back into the
+[[.nw]] buffer.  Tangling for real, rather than extracting chunk
+regions in place, is what makes the language server's view
+\emph{honest}:
+chunks appear in tangled order and at their spliced indentation, so
+Python's indentation-sensitive parse and cross-chunk references both
+work.  This is Neovim-only ([[vim.system]], [[vim.lsp]],
+[[vim.diagnostic]]); on Vim the plugin simply keeps its
+v1.6.1 behaviour.
+
+The line mapping does not have to be invented: noweb's
+\texttt{linemark} filter (from the author's noweb fork,
+\texttt{contrib/dbosk}) exists precisely because [[notangle -L]]
+cannot preserve indentation in languages like Python.  Run as
+[[notangle -filter linemark]], it inserts a source-location comment
+at the start of each code chunk and after each line that uses a
+chunk---\texttt{\# 5 "foo.nw"}, with a configurable comment
+leader---and tangles \emph{without} [[-L]], so the code itself is
+untouched.  A marker announces the source line of the tangled line
+that follows it; lines then advance in lockstep until the next
+marker.  The markers stay in the shadow buffer (they are comments;
+the language server reads past them) and \emph{are} the map: one
+pass over the buffer recovers, for every tangled line, its source
+line---unique, because every tangled line comes from exactly one
+source line.  The forward direction is ambiguous when a chunk is
+spliced more than once; the plugin then maps to the first splice.
+Columns differ from the source only by the splice indentation, so
+the column correction is the difference in leading whitespace.
+(The companion \texttt{nolinemap} maps \emph{tool output} back the
+same way; \cref{sec:nowebmake} uses it directly.)
+
+\subsection{What the Lua side needs to know}
+
+The shadow module needs two things the Vim script side already
+computes: the chunk inventory (roots are chunks that are defined but
+never used) and each chunk's language (\cref{sec:infer}).  Script's
+locals stay local; two accessors export them.
+
+<<[[noweb#occurrences]] and [[noweb#languages]] accessors>>=
+" Accessors for the Lua shadow module (lua/noweb/shadow.lua): the
+" occurrence inventory and the chunk-language map of this buffer.
+function! noweb#occurrences() abort
+  return s:chunk_occurrences()
+endfunction
+
+function! noweb#languages() abort
+  return s:infer_languages()
+endfunction
+
+" Command completion for :NowebTangled: the shadow root names.
+function! noweb#tangled_roots(arglead, cmdline, cursorpos) abort
+  return filter(luaeval('require("noweb.shadow").roots()'),
+        \ 'stridx(v:val, a:arglead) >= 0')
+endfunction
+@
+
+\subsection{The shadow module}
+\label{sec:shadowmodule}
+
+The module keeps, per noweb buffer, one shadow per typed root:
+the hidden buffer, the two line maps, and the marker set.  Sync is
+memoized on [[b:changedtick]] exactly like the occurrence scan.
+
+<<[[lua/noweb/shadow.lua]]>>=
+-- lua/noweb/shadow.lua -- invisible tangled buffers backing language
+-- intelligence (diagnostics, completion, hover, goto) in code chunks.
+--
+-- One shadow per typed root chunk: a hidden buffer holding
+--   notangle -t8 -filter "linemark -c <leader>" -R<root>
+-- of the live .nw buffer.  The linemark markers stay in the buffer
+-- and provide the line maps; language servers attach to the shadow
+-- and results map back into the .nw buffer.
+
+local M = {}
+
+-- state[nwbuf] = { tick = changedtick, roots = { [root] = shadow } }
+-- shadow = { buf, root, lang, cfg, ns,
+--            src = { tangled line -> source line },
+--            fwd = { source line -> first tangled line },
+--            marker = { tangled line -> true } }
+local state = {}
+
+-- NB: the skeleton splices a few chunks in dependency order rather
+-- than the document's presentation order: a closure captures a local
+-- as an upvalue only if the local exists at definition time, so
+-- forward_diagnostics precedes ensure_shadow's autocmd, and the
+-- preview state precedes sync's view refresh.
+
+<<shadow: language configuration>>
+
+<<shadow: discover the typed roots>>
+
+<<shadow: rejoin mid-line splices>>
+
+<<shadow: request eager markers>>
+
+<<shadow: tangle one root with markers>>
+
+<<shadow: parse the markers into line maps>>
+
+<<shadow: forward diagnostics into the noweb buffer>>
+
+<<shadow: the hidden buffer and its language server>>
+
+<<shadow: the synced preview>>
+
+<<shadow: sync>>
+
+<<shadow: locate a source position in a shadow>>
+
+<<shadow: LSP queries at the cursor>>
+
+<<shadow: quickfix through nolinemap>>
+
+<<shadow: setup>>
+
+return M
+@
+
+Languages are described by a comment leader (for linemark), a
+filetype (set on the shadow buffer: it names the language to the LSP
+client and lets that language's own plugins---lean.nvim, for
+one---attach their machinery), optionally a language-server command,
+and definition patterns for the serverless [[gd]]
+(\cref{sec:hoverdef}).  The keys are Vim syntax names, the same
+names the language inference produces.  [[g:noweb_languages]]
+extends or overrides the defaults.  The defaults \emph{name} a
+standard server per language---jedi for Python, bash-language-server
+for the shells, clangd, rust-analyzer, digestif for \TeX{},
+lua-language-server, HLS, jdtls---but attach only the ones actually
+installed, so the defaults cost nothing where a server is absent.
+
+The default set mirrors the languages noweb itself ships
+\texttt{-autodefs} filters for, and each [[definitions]] list ports
+the corresponding recognizer's rules (their sources live in the
+fork's \texttt{src/icon/*defs.nw}): C and C++ dispatch on
+declaration keywords, macros and the left-margin function form (C++
+adding classes, namespaces and [[Foo::bar]]-qualified members),
+Haskell on type signatures and left-margin equations, Rust and Java
+on their declaration keywords, \TeX{} on [[\def]] and the
+[[\newcommand]] family, Icon on procedures and records, Pascal on
+its (case-folded) routine keywords, yacc on grammar rules and
+declarations.  The shell entry serves [[zsh]] too, as noweb's bash
+autodefs serves the whole family.  Three autodefs languages are
+deliberately absent: SML and Promela have no line comment for the
+markers (linemark's custom format could carry a block comment; not
+wired yet), and asdl, lrtl and mmix are one configuration line away
+for whoever tangles them.
+
+<<shadow: language configuration>>=
+-- A language without an lsp entry still earns its shadow: the
+-- preview, :NowebMake and the pattern-based gd all work for any
+-- typed root.  definitions are Lua patterns over tangled lines;
+-- @NAME@ stands for the (escaped) identifier.  The default language
+-- set mirrors the languages noweb ships autodefs filters for, and
+-- the patterns port each recognizer's rules.
+local sh_definitions = { '^%s*@NAME@%s*%(%s*%)',
+                         '^%s*function%s+@NAME@%f[%W]',
+                         '^%s*@NAME@=', '^%s*@NAME@%+=',
+                         '^%s*local%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*export%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*typeset%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*declare%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '^%s*readonly%s[^=]*%f[%w]@NAME@%f[%W]',
+                         '%f[%w]for%s+@NAME@%f[%W]',
+                         '%f[%w]read%s+@NAME@%f[%W]',
+                         '%f[%w]@NAME@=', '%f[%w]@NAME@%+=' }
+local c_definitions = { '^%s*#%s*define%s+@NAME@%f[%W]',
+                        '^[%w_][%w_%s%*&<>,:]-%f[%w]@NAME@%s*%(',
+                        '%f[%w]struct%s+@NAME@%f[%W]',
+                        '%f[%w]enum%s+@NAME@%f[%W]',
+                        '%f[%w]union%s+@NAME@%f[%W]',
+                        '%f[%w]typedef[^;]*%f[%w]@NAME@%s*;' }
+local defaults = {
+  python = { leader = '#', filetype = 'python',
+             lsp = { 'jedi-language-server' },
+             definitions = { '^%s*def%s+@NAME@%s*%(',
+                             '^%s*class%s+@NAME@%f[%W]',
+                             '^%s*@NAME@%s*=',
+                             '%f[%w]for%s+@NAME@%f[%W]' } },
+  lean   = { leader = '--', filetype = 'lean',
+             definitions = { '%f[%w]def%s+@NAME@%f[%W]',
+                             '%f[%w]theorem%s+@NAME@%f[%W]',
+                             '%f[%w]lemma%s+@NAME@%f[%W]',
+                             '%f[%w]structure%s+@NAME@%f[%W]' } },
+  lua    = { leader = '--', filetype = 'lua',
+             lsp = { 'lua-language-server' },
+             definitions = { 'function%s+@NAME@%f[%W]',
+                             'local%s+function%s+@NAME@%f[%W]',
+                             'local%s+@NAME@%f[%W]',
+                             '^%s*@NAME@%s*=',
+                             '%f[%w]for%s+@NAME@%f[%W]' } },
+  sh     = { leader = '#', filetype = 'sh', definitions = sh_definitions,
+             lsp = { 'bash-language-server', 'start' } },
+  zsh    = { leader = '#', filetype = 'zsh', definitions = sh_definitions,
+             lsp = { 'bash-language-server', 'start' } },
+  make   = { leader = '#', filetype = 'make',
+             definitions = { '^@NAME@%s*:' } },
+  c      = { leader = '//', filetype = 'c', definitions = c_definitions,
+             lsp = { 'clangd' } },
+  cpp    = { leader = '//', filetype = 'cpp', lsp = { 'clangd' },
+             definitions = vim.list_extend(
+               { '%f[%w]class%s+@NAME@%f[%W]',
+                 '%f[%w]namespace%s+@NAME@%f[%W]',
+                 '%f[%w][%w_]+::@NAME@%s*%(' },
+               c_definitions) },
+  haskell = { leader = '--', filetype = 'haskell',
+              lsp = { 'haskell-language-server-wrapper', '--lsp' },
+              definitions = { '^@NAME@%s*::', '^@NAME@[%s,].*::',
+                              '%f[%w]data%s+@NAME@%f[%W]',
+                              '%f[%w]newtype%s+@NAME@%f[%W]',
+                              '%f[%w]type%s+@NAME@%f[%W]',
+                              '%f[%w]class%s+@NAME@%f[%W]',
+                              '^@NAME@%f[%W]' } },
+  java   = { leader = '//', filetype = 'java', lsp = { 'jdtls' },
+             definitions = { '%f[%w]class%s+@NAME@%f[%W]',
+                             '%f[%w]interface%s+@NAME@%f[%W]',
+                             '%f[%w]enum%s+@NAME@%f[%W]',
+                             '%f[%w]record%s+@NAME@%f[%W]',
+                             '^%s*[%w<>%[%],%s]-%f[%w]@NAME@%s*%(',
+                             '^%s*[%w<>%[%],%s]-%f[%w]@NAME@%s*[=;]' } },
+  rust   = { leader = '//', filetype = 'rust', lsp = { 'rust-analyzer' },
+             definitions = { '%f[%w]fn%s+@NAME@%f[%W]',
+                             '%f[%w]struct%s+@NAME@%f[%W]',
+                             '%f[%w]enum%s+@NAME@%f[%W]',
+                             '%f[%w]trait%s+@NAME@%f[%W]',
+                             '%f[%w]mod%s+@NAME@%f[%W]',
+                             '%f[%w]union%s+@NAME@%f[%W]',
+                             '%f[%w]type%s+@NAME@%f[%W]',
+                             '%f[%w]const%s+@NAME@%f[%W]',
+                             '%f[%w]static%s+@NAME@%f[%W]',
+                             '%f[%w]let%s+@NAME@%f[%W]',
+                             '%f[%w]let%s+mut%s+@NAME@%f[%W]',
+                             'macro_rules!%s*@NAME@%f[%W]' } },
+  tex    = { leader = '%', filetype = 'tex', lsp = { 'digestif' },
+             definitions = { '\\def%s*\\@NAME@%f[%W]',
+                             '\\newcommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\renewcommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\providecommand%*?%s*{?\\@NAME@%f[%W]',
+                             '\\newenvironment%s*{@NAME@}',
+                             '\\newtheorem%s*{@NAME@}' } },
+  icon   = { leader = '#', filetype = 'icon',
+             definitions = { '%f[%w]procedure%s+@NAME@%f[%W]',
+                             '%f[%w]record%s+@NAME@%f[%W]',
+                             '%f[%w]global%s[%w%s,]-%f[%w]@NAME@%f[%W]' } },
+  pascal = { leader = '//', filetype = 'pascal',
+             definitions = { '%f[%w][Pp]rocedure%s+@NAME@%f[%W]',
+                             '%f[%w][Ff]unction%s+@NAME@%f[%W]',
+                             '%f[%w][Cc]onstructor%s+@NAME@%f[%W]',
+                             '^%s*@NAME@%s*=',
+                             '^%s*@NAME@%s*:' } },
+  yacc   = { leader = '//', filetype = 'yacc',
+             definitions = { '^@NAME@%s*:',
+                             '^%%token[%w%s<>%.]-%f[%w]@NAME@%f[%W]',
+                             '^%%type[%w%s<>%.]-%f[%w]@NAME@%f[%W]' } },
+}
+-- The filetype database answers 'plaintex' for a bare .tex name.
+defaults.plaintex = vim.tbl_extend('force', defaults.tex,
+                                   { filetype = 'plaintex' })
+
+local function language_config()
+  return vim.tbl_deep_extend('force', defaults, vim.g.noweb_languages or {})
+end
+@
+
+A root is a chunk that is defined but never used; it gets a shadow
+when its inferred language has a configuration.  Both facts come
+from the Vim script side through the accessors, so there is exactly
+one inventory and one inference.
+
+<<shadow: discover the typed roots>>=
+local function typed_roots(nwbuf)
+  local occ, langs
+  vim.api.nvim_buf_call(nwbuf, function()
+    occ = vim.fn['noweb#occurrences']()
+    langs = vim.fn['noweb#languages']()
+  end)
+  local cfg = language_config()
+  local roots = {}
+  for name, entry in pairs(occ) do
+    if #entry.defs > 0 and #entry.uses == 0 then
+      local lang = langs[name]
+      if lang and cfg[lang] then
+        roots[name] = { lang = lang, cfg = cfg[lang] }
+      end
+    end
+  end
+  return roots
+end
+@
+
+Tangling feeds the \emph{live buffer} to notangle on stdin, so
+unsaved chunks are part of the shadow the moment they are typed.
+The leader is single-quoted inside the filter string because
+notangle hands the filter to a shell (an unquoted [[#]] would start
+a comment there).  The call is synchronous; notangle on a large
+source is a few milliseconds, and sync is memoized and debounced.
+The exit status is advisory: a use of an undefined chunk---legal
+noweb, and common in a document still being written---makes
+notangle warn and exit non-zero while tangling the chunk as empty,
+and losing every shadow over it would punish exactly the moment
+the tooling helps most.  Only a run with no output at all fails.
+
+Note the absent [[-t8]]: the shadow should show the language server
+what the \emph{build} will produce, and notangle's default---tabs
+expanded---is what build setups overwhelmingly tangle with.  Dogfood
+proved the point: with [[-t8]] the shadow of a real Python source
+preserved literal tabs its build would have expanded, and the server
+reported a [[TabError]] the shipped program does not have.  A
+language whose build does tangle differently can say so:
+[[tangle]] in its [[g:noweb_languages]] entry is a list of extra
+notangle arguments.  (The maps are indifferent either way---the
+column correction reads the actual leading whitespace of both
+lines.)
+
+<<shadow: tangle one root with markers>>=
+local function tangle(nwbuf, root, cfg)
+  local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
+  local argv = { 'notangle' }
+  vim.list_extend(argv, cfg.tangle or {})
+  vim.list_extend(argv, {
+    '-filter', 'linemark ' .. eager_flag() .. "-c '" .. cfg.leader .. "'",
+    '-R' .. root,
+  })
+  local res = vim.system(argv,
+    { stdin = table.concat(lines, '\n') .. '\n', text = true }):wait(5000)
+  -- notangle warns and exits non-zero on an undefined chunk, but still
+  -- tangles it as empty; a document in progress keeps its shadows, so
+  -- only a run that produced no output at all counts as failed.
+  if not res or (res.code ~= 0 and (res.stdout or '') == '') then
+    return nil
+  end
+  local out = vim.split(res.stdout or '', '\n')
+  if out[#out] == '' then
+    table.remove(out)
+  end
+  return rejoin_splices(out, cfg.leader)
+end
+@
+
+Linemark plants a chunk's start marker at the \emph{definition}
+site, so it rides along into every splice.  Spliced on a line of
+its own---the overwhelmingly common whole-line use---the marker
+lands on a line of its own, a legal comment.  But a chunk used
+\emph{mid-line}, as in
+
+\begin{minted}{bash}
+  | if [ @<<test for programming terms@>> ]; then
+\end{minted}
+
+\noindent
+drags the marker into the middle of that line, where its comment
+leader swallows the rest---and since a marker only means anything
+at a line boundary, linemark must break the line after it.  The
+splice that plain notangle joins seamlessly comes out split in
+two, re-indented, with a marker wedged between: no longer the
+program the build produces, and for many languages no longer a
+program at all (the shell in the example loses [[if]]'s condition
+to a comment).  The language server then reports errors the real
+program does not have, and the marker line, being glued to code,
+escapes the preview's whole-line filter.
+
+The repair below undoes exactly what linemark did: an inline
+marker moves onto a line of its own \emph{before} the junction,
+and the two halves of the broken line are joined back together,
+stripping the indentation notangle added for what it took to be a
+continuation line (the width of the code before the marker,
+tab-aware at notangle's default tab stops of eight).  The result
+is byte-identical to the plain tangle except for whole-line
+markers, everywhere.  The maps stay exact too, with one nuance:
+the joined line carries text from two source lines---the use line
+and the chunk's first---and one line can only map to one.  The
+marker parser below settles that in the use line's favor whenever
+its text visibly lives on in the junction.
+
+The relocated marker also keeps the tangle self-describing for
+\texttt{nolinemap}, which derives the same map from the same
+markers when [[:NowebMake]] runs a compiler over it
+(\cref{sec:nowebmake}).
+
+Newer linemark, prompted by this very repair, defaults to a
+\emph{safe} placement that never breaks a spliced line: a chunk's
+first marker follows its first line, and no marker lands after a
+backslash-continued one.  Good for raw consumers, but the safety is
+bought with anchoring---lines skipped over anchor across the splice
+by counting, and a continuation-heavy chunk like edumail's grep
+pipeline would lose the exact per-line map the repair recovers.
+Since we \emph{are} a consumer that repairs junctions, the shadows
+ask linemark for the old placement with [[-e]]: every marker
+present, every line anchored, every break mended here.  Whether the
+installed linemark knows the flag is probed once, by tangling a
+one-chunk document through it; an older linemark fails the probe
+and is simply eager by default, so both answers lead to the same
+stream.
+
+<<shadow: request eager markers>>=
+local eager
+local function eager_flag()
+  if eager == nil then
+    local res = vim.system(
+      { 'notangle', '-filter', 'linemark -e', '-Rprobe' },
+      { stdin = '@<<probe@>>=\nx\n@\n', text = true }):wait(2000)
+    eager = (res and res.code == 0) and '-e ' or ''
+  end
+  return eager
+end
+@
+
+<<shadow: rejoin mid-line splices>>=
+local function display_width(s)
+  local w = 0
+  for i = 1, #s do
+    w = s:byte(i) == 9 and w + 8 - w % 8 or w + 1
+  end
+  return w
+end
+
+local function strip_columns(line, width)
+  local col, i = 0, 1
+  while col < width and i <= #line do
+    local b = line:byte(i)
+    if b == 9 then
+      col = col + 8 - col % 8
+    elseif b == 32 then
+      col = col + 1
+    else
+      break
+    end
+    i = i + 1
+  end
+  return line:sub(i)
+end
+
+local function rejoin_splices(lines, leader)
+  local inline = '^(.-)(' .. vim.pesc(leader) .. ' %d+ "[^"]*")%s*$'
+  local out = {}
+  local i = 1
+  while i <= #lines do
+    local prefix, mark = lines[i]:match(inline)
+    if prefix and prefix:find('%S') and i < #lines then
+      -- A marker spliced into the middle of a line: give it a line
+      -- of its own and mend the line linemark broke, undoing the
+      -- continuation indent notangle added to the second half.
+      table.insert(out, mark)
+      lines[i + 1] = prefix
+        .. strip_columns(lines[i + 1], display_width(prefix))
+    else
+      table.insert(out, lines[i])
+    end
+    i = i + 1
+  end
+  return out
+end
+@
+
+A marker line announces the source line of the tangled line that
+follows; both the marker and that line map to it, and subsequent
+lines count up until the next marker.  After the rejoining above,
+every marker stands on a line of its own.  Markers are indented
+with their splice, hence the leading-whitespace allowance.
+
+The parser also decides which markers may \emph{stay} in the text.
+Eager linemark marks every discontinuity, including one it cannot
+mark safely: a re-anchor after a use line ending in a backslash
+lands between that line and its continuation, severing them.  (This
+also lurked, unrepaired, in the shadows of earlier versions.)  Such
+a marker is left out of the shadow text---the continuation stays
+whole---but its announcement still anchors the map, which is the
+whole point of asking for eager markers: the information arrives
+even where the comment cannot.  The function therefore returns the
+buffer content alongside the maps, with [[src]], [[fwd]] and
+[[marker]] keyed by the lines the buffer actually gets.
+
+One refinement, and it is what makes the maps usable around
+mid-line uses.  A marker that interrupts the running count marks a
+chunk use, and the source line it interrupted---the use line---may
+live on in the tangled line after the marker: the rejoined
+junction starts with the text the use line put before the
+reference, and a chunk of a single line gets the use line's tail
+glued on.  Attributing that line to the announced chunk line, as
+the plain counting would, orphans the use line entirely---and a
+chunk like
+
+\begin{minted}{text}
+@<<grep@>>=
+grep -qiEo
+@
+\end{minted}
+
+\noindent
+used once per pattern line makes it absurd: six tangled lines all
+mapping to the one-line definition, six use lines mapping nowhere,
+and the preview cursor going still over the whole block.  So when
+the use line visibly lives on in the junction---text before the
+reference, or a tail glued to a single-line chunk (the tangled
+line after the junction is a marker again)---the junction maps to
+the \emph{use} line.  A whole-line use contributes nothing to its
+splice, and the splice stays the chunk's, exactly as before.
+Nested splices can stack several interrupted lines onto one
+junction (a use expanding a chunk whose first line is again a
+use); each of them gets its forward mapping into the junction, and
+the reverse map goes to the innermost, whose text dominates the
+line.
+
+<<shadow: parse the markers into line maps>>=
+local function use_lives_on(useline, nextline, pat)
+  if not useline or useline:match('^@<<.-@>>=%s*$') then
+    return false
+  end
+  local prefix, tail = useline:match('^(.-)@<<.-@>>(.*)$')
+  if not prefix then
+    return false
+  end
+  return prefix:find('%S') ~= nil
+    or (tail:find('%S') ~= nil
+        and nextline ~= nil and nextline:match(pat) ~= nil)
+end
+
+local function parse_maps(lines, leader, srclines)
+  local pat = '^%s*' .. vim.pesc(leader) .. ' (%d+) "'
+  local out, src, fwd, marker = {}, {}, {}, {}
+  local cur = nil
+  local pending = {}
+  for t, line in ipairs(lines) do
+    local announced = line:match(pat)
+    if announced then
+      if cur then
+        table.insert(pending, cur)
+      end
+      cur = tonumber(announced)
+      local prev = out[#out]
+      if not (prev and prev:match('\\$')) then
+        -- a marker after a backslash-continued line would sever the
+        -- continuation: leave it out of the text, keep its
+        -- announcement for the map
+        table.insert(out, line)
+        marker[#out] = true
+        src[#out] = cur
+      end
+    elseif cur then
+      table.insert(out, line)
+      local o = #out
+      src[o] = cur
+      for _, u in ipairs(pending) do
+        if use_lives_on(srclines[u], lines[t + 1], pat) then
+          src[o] = u
+          if not fwd[u] then
+            fwd[u] = o
+          end
+        end
+      end
+      pending = {}
+      if not fwd[cur] then
+        fwd[cur] = o
+      end
+      cur = cur + 1
+    else
+      table.insert(out, line)
+    end
+  end
+  return out, src, fwd, marker
+end
+@
+
+The shadow buffer is an unlisted scratch buffer named after the
+source and the root, so buffer lists and language servers can tell
+shadows apart.  Setting its filetype is deliberately more than
+cosmetic: the LSP client derives the document's language from it,
+and the language's own ftplugins run on the hidden buffer.  The
+server, when configured, is started with the noweb file's directory
+as root; [[vim.lsp.start]] reuses a running client for the same
+name and root.
+
+<<shadow: the hidden buffer and its language server>>=
+local function shadow_name(nwbuf, root)
+  local nwname = vim.api.nvim_buf_get_name(nwbuf)
+  return nwname .. '.shadow/' .. root:gsub('[%[%]]', '')
+end
+
+local function ensure_shadow(nwbuf, root, lang, cfg)
+  local st = state[nwbuf]
+  local sh = st.roots[root]
+  if not (sh and vim.api.nvim_buf_is_valid(sh.buf)) then
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, shadow_name(nwbuf, root))
+    sh = { buf = buf, root = root, lang = lang, cfg = cfg,
+           ns = vim.api.nvim_create_namespace('noweb-shadow:' .. root) }
+    st.roots[root] = sh
+    vim.bo[buf].filetype = cfg.filetype
+    -- Defaults name a server per language; only attach the ones that
+    -- are actually installed, so the defaults are harmless everywhere.
+    if cfg.lsp and vim.fn.executable(cfg.lsp[1]) == 1 then
+      vim.lsp.start({
+        name = 'noweb-' .. lang,
+        cmd = cfg.lsp,
+        root_dir = vim.fs.dirname(vim.api.nvim_buf_get_name(nwbuf)),
+      }, { bufnr = buf })
+    end
+    <<shadow: forward this shadow's diagnostics>>
+  end
+  return sh
+end
+@
+
+Diagnostics translate line by line: the diagnostic's tangled line
+looks up its source line, the column moves by the difference in
+leading whitespace (the splice indent), and diagnostics on marker
+lines---lines the author never wrote---are dropped.  The translated
+set is published on the noweb buffer in the shadow's own namespace,
+so several roots coexist.
+
+<<shadow: forward diagnostics into the noweb buffer>>=
+local function indent_width(line)
+  return #(line:match('^%s*') or '')
+end
+
+local function col_delta(sh, t, nwbuf)
+  local tline = (vim.api.nvim_buf_get_lines(sh.buf, t - 1, t, false)[1]) or ''
+  local nline = (vim.api.nvim_buf_get_lines(
+    nwbuf, sh.src[t] - 1, sh.src[t], false)[1]) or ''
+  return indent_width(tline) - indent_width(nline)
+end
+
+local function forward_diagnostics(nwbuf, sh)
+  local out = {}
+  for _, d in ipairs(vim.diagnostic.get(sh.buf)) do
+    local t = d.lnum + 1
+    if sh.src[t] and not sh.marker[t] then
+      local delta = col_delta(sh, t, nwbuf)
+      local nd = vim.tbl_extend('force', {}, d)
+      nd.bufnr = nwbuf
+      nd.lnum = sh.src[t] - 1
+      nd.col = math.max(0, d.col - delta)
+      if nd.end_lnum and sh.src[nd.end_lnum + 1] then
+        nd.end_lnum = sh.src[nd.end_lnum + 1] - 1
+        nd.end_col = math.max(0, (nd.end_col or 0) - delta)
+      else
+        nd.end_lnum = nd.lnum
+        nd.end_col = nd.col
+      end
+      table.insert(out, nd)
+    end
+  end
+  vim.diagnostic.set(sh.ns, nwbuf, out)
+end
+@
+
+<<shadow: forward this shadow's diagnostics>>=
+vim.api.nvim_create_autocmd('DiagnosticChanged', {
+  buffer = sh.buf,
+  callback = function()
+    if vim.api.nvim_buf_is_valid(nwbuf) then
+      forward_diagnostics(nwbuf, sh)
+    end
+  end,
+})
+@
+
+Sync re-tangles every typed root whose buffer changed since the last
+sync, updates the shadow buffers (which sends the language servers
+their [[didChange]]), rebuilds the maps, and drops shadows whose
+root disappeared.
+
+<<shadow: sync>>=
+function M.sync(nwbuf)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = state[nwbuf]
+  if not st then
+    return nil
+  end
+  local tick = vim.api.nvim_buf_get_changedtick(nwbuf)
+  if st.tick == tick then
+    return st
+  end
+  st.tick = tick
+  local roots = typed_roots(nwbuf)
+  for root, sh in pairs(st.roots) do
+    if not roots[root] then
+      vim.diagnostic.reset(sh.ns, nwbuf)
+      pcall(vim.api.nvim_buf_delete, sh.buf, { force = true })
+      st.roots[root] = nil
+    end
+  end
+  local srclines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
+  for root, info in pairs(roots) do
+    local lines = tangle(nwbuf, root, info.cfg)
+    if lines then
+      local sh = ensure_shadow(nwbuf, root, info.lang, info.cfg)
+      local content
+      content, sh.src, sh.fwd, sh.marker =
+        parse_maps(lines, info.cfg.leader, srclines)
+      local old = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+      if not vim.deep_equal(old, content) then
+        -- the preview marks the shadow nomodifiable; lift it briefly
+        local mod = vim.bo[sh.buf].modifiable
+        vim.bo[sh.buf].modifiable = true
+        vim.api.nvim_buf_set_lines(sh.buf, 0, -1, false, content)
+        vim.bo[sh.buf].modifiable = mod
+      end
+      forward_diagnostics(nwbuf, sh)
+      local p = preview[nwbuf]
+      if p and p.sh == sh and p.pbuf ~= sh.buf
+          and vim.api.nvim_buf_is_valid(p.pbuf) then
+        p.pv2t, p.t2pv = refresh_view(p.pbuf, sh)
+      end
+    end
+  end
+  return st
+end
+@
+
+Queries need to know which shadow, if any, holds a given source
+line, and where.  Prose lines are in no shadow; a line of a chunk
+spliced several times maps to its first splice.
+
+<<shadow: locate a source position in a shadow>>=
+-- Locate source line lnum: returns shadow, tangled line, column delta.
+function M.locate(nwbuf, lnum)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = M.sync(nwbuf)
+  if not st then
+    return nil
+  end
+  for _, sh in pairs(st.roots) do
+    local t = sh.fwd[lnum]
+    if t then
+      return sh, t, col_delta(sh, t, nwbuf)
+    end
+  end
+  return nil
+end
+@
+
+Setup runs once per noweb buffer, from the ftplugin: an initial
+sync, a debounced re-sync on edits (leaving insert mode or any
+change in normal mode), and cleanup when the buffer goes away.  The
+debounce keeps diagnostics live without tangling on every
+keystroke; queries call [[M.sync]] themselves, so they never see a
+stale shadow regardless of the timer.
+
+<<shadow: setup>>=
+function M.setup(nwbuf)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  if state[nwbuf] then
+    return
+  end
+  state[nwbuf] = { tick = -1, roots = {} }
+  local group = vim.api.nvim_create_augroup('noweb-shadow:' .. nwbuf, {})
+  local pending = false
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      if not pending then
+        pending = true
+        vim.defer_fn(function()
+          pending = false
+          if vim.api.nvim_buf_is_valid(nwbuf) then
+            M.sync(nwbuf)
+          end
+        end, 300)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = group,
+    buffer = nwbuf,
+    callback = function()
+      for _, sh in pairs(state[nwbuf].roots) do
+        pcall(vim.api.nvim_buf_delete, sh.buf, { force = true })
+      end
+      state[nwbuf] = nil
+      vim.api.nvim_del_augroup_by_id(group)
+    end,
+  })
+  M.sync(nwbuf)
+end
+@
+
+\subsection{Queries against the shadow}
+\label{sec:shadowqueries}
+
+The three interactive queries---completion, hover, definition---all
+follow the same shape: map the cursor position into the shadow
+(line through [[fwd]], column shifted by the splice indent), send
+the LSP request \emph{synchronously} against the shadow buffer, and
+map the answer back.  Synchronous is the right call here: an
+omnifunc must return its candidates in-call, and a warm language
+server answers in milliseconds.  (Positions use byte columns; LSP
+counts UTF-16 units, so heavily non-ASCII lines can be off within
+the line---a documented approximation, not worth the encoding dance
+until it bites.)
+
+Completion converts LSP items to omnifunc dictionaries---the
+inserted [[word]], the displayed [[abbr]], the item kind in
+[[menu]], documentation in [[info]]---and filters by the typed
+prefix, since a server returns everything visible at the position.
+
+<<shadow: LSP queries at the cursor>>=
+local function cursor_params(nwbuf)
+  local lnum, col = unpack(vim.api.nvim_win_get_cursor(0))
+  local sh, t, delta = M.locate(nwbuf, lnum)
+  if not sh or #vim.lsp.get_clients({ bufnr = sh.buf }) == 0 then
+    return nil
+  end
+  return sh, {
+    textDocument = { uri = vim.uri_from_bufnr(sh.buf) },
+    position = { line = t - 1, character = col + delta },
+  }
+end
+
+function M.complete(base)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if not sh then
+    return {}
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/completion', params, 3000)
+  local items = {}
+  for _, res in pairs(results or {}) do
+    for _, it in ipairs((res.result and (res.result.items or res.result)) or {}) do
+      -- Servers may offer snippet insertText ($0 placeholders); an
+      -- omnifunc inserts plain text, so those fall back to the label.
+      local word = it.label
+      if (it.insertTextFormat or 1) == 1 then
+        word = (it.textEdit and it.textEdit.newText)
+          or it.insertText or it.label
+      end
+      if vim.startswith(it.filterText or it.label, base)
+          or vim.startswith(word, base) then
+        local doc = it.documentation
+        table.insert(items, {
+          word = word,
+          abbr = it.label,
+          menu = vim.lsp.protocol.CompletionItemKind[it.kind] or '',
+          info = type(doc) == 'table' and doc.value or doc or '',
+          icase = 0,
+          dup = 0,
+        })
+      end
+    end
+  end
+  return items
+end
+@
+
+Hover shows the server's documentation in a floating window over
+the [[.nw]] buffer; a [[false]] return lets the caller fall back to
+the ordinary [[K]].  Definition results need one more map: a target
+inside the shadow is translated back to its source line (and its
+own column correction---the definition may sit at another splice
+depth); a target in some other file is a real file, jumped to
+directly.  Both jumps set the jump mark, so [[CTRL-O]] returns.
+
+Not every language has a server, and no server is needed for the
+common case: the shadow holds the \emph{whole} tangled program, so
+when the LSP route yields nothing, a definition-pattern search over
+the shadow finds the identifier's defining line---[[assignments() {]]
+in a shell program, [[def f(]] in Python, a make target, and for
+variables the declaration or first assignment ([[local]],
+[[export]], [[x=...]], a [[for]] binding; for shell even a mid-line
+assignment, so a variable born inside generated code is
+found)---wherever the defining chunk sits, and the source map turns
+the hit into a [[.nw]] jump.  The patterns live in the language configuration
+([[definitions]], with [[@NAME@]] standing for the identifier), so
+[[g:noweb_languages]] tunes them per language.  The fallback is
+first-match with no notion of scope; that is what it costs to work
+with no server at all, and the LSP answer wins whenever there is
+one.
+
+<<shadow: LSP queries at the cursor>>=
+function M.hover()
+  local sh, params = cursor_params(vim.api.nvim_get_current_buf())
+  if not sh then
+    return false
+  end
+  local results = vim.lsp.buf_request_sync(
+    sh.buf, 'textDocument/hover', params, 3000)
+  for _, res in pairs(results or {}) do
+    if res.result and res.result.contents then
+      local lines = vim.lsp.util.convert_input_to_markdown_lines(
+        res.result.contents)
+      if #lines > 0 then
+        vim.lsp.util.open_floating_preview(lines, 'markdown',
+          { border = 'rounded' })
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function M.definition()
+  local nwbuf = vim.api.nvim_get_current_buf()
+  local sh, params = cursor_params(nwbuf)
+  if sh then
+    local results = vim.lsp.buf_request_sync(
+      sh.buf, 'textDocument/definition', params, 3000)
+    for _, res in pairs(results or {}) do
+      local locs = res.result or {}
+      if locs.uri or locs.targetUri then
+        locs = { locs }
+      end
+      for _, loc in ipairs(locs) do
+        local uri = loc.uri or loc.targetUri
+        local range = loc.range or loc.targetSelectionRange
+        vim.cmd([[normal! m']])
+        if uri == vim.uri_from_bufnr(sh.buf) then
+          local nl = sh.src[range.start.line + 1]
+          if nl then
+            local d = col_delta(sh, range.start.line + 1, nwbuf)
+            vim.api.nvim_win_set_cursor(0,
+              { nl, math.max(0, range.start.character - d) })
+            return true
+          end
+        else
+          local client = vim.lsp.get_clients({ bufnr = sh.buf })[1]
+          vim.lsp.util.show_document(loc, client.offset_encoding,
+            { focus = true })
+          return true
+        end
+      end
+    end
+  end
+  return M.pattern_definition(nwbuf)
+end
+
+-- The serverless fallback: search the shadow for a line matching one
+-- of the language's definition patterns for the identifier under the
+-- cursor, and jump to its source line in the .nw.
+function M.pattern_definition(nwbuf)
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = M.locate(nwbuf, lnum)
+  if not sh or not sh.cfg.definitions then
+    return false
+  end
+  local name = vim.fn.expand('<cword>')
+  if name == '' then
+    return false
+  end
+  -- pesc's % escapes are themselves magic in a gsub replacement
+  local escaped = vim.pesc(name):gsub('%%', '%%%%')
+  local pats = {}
+  for _, p in ipairs(sh.cfg.definitions) do
+    table.insert(pats, (p:gsub('@NAME@', escaped)))
+  end
+  local lines = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+  for t, line in ipairs(lines) do
+    if not sh.marker[t] and sh.src[t] then
+      for _, pat in ipairs(pats) do
+        local s = line:find(pat)
+        if s then
+          vim.cmd([[normal! m']])
+          local d = col_delta(sh, t, nwbuf)
+          vim.api.nvim_win_set_cursor(0,
+            { sh.src[t], math.max(0, s - 1 - d) })
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+@
+
+\subsection{Routing the omnifunc}
+\label{sec:router}
+
+One omnifunc serves three targets, which keeps every completion
+frontend working through the single interface it already knows.
+The route is decided at [[findstart]] time and remembered for the
+candidates call:
+
+\begin{enumerate}
+\item after an unclosed [[@<<]]: chunk names (\cref{sec:complete});
+\item on a line some shadow holds: that shadow's language server;
+\item in prose with VimTeX initialized: VimTeX's own omnifunc,
+  delegated wholesale (it knows where a [[\cite]] or [[\ref]]
+  argument begins).
+\end{enumerate}
+
+For the language-server route the start-of-word rule is the
+keyword-character run before the cursor---what an identifier means
+in most languages; the server itself decides what the candidates
+are.
+
+The chosen route is script state between the omnifunc's two calls.
+It is initialized at load time so that a candidates call without a
+preceding [[findstart]]---no real frontend does that, but a
+re-sourced script would---degrades to an empty answer instead of an
+error.
+
+<<the route between the omnifunc's two calls>>=
+let s:route = ''
+@
+
+<<route the completion and find its start>>=
+let l:before = strpart(getline('.'), 0, col('.') - 1)
+let l:start = matchend(l:before, '.*@\@1<!@<<')
+if l:start >= 0 && stridx(l:before, '>', l:start) < 0
+  let s:route = 'chunk'
+  return l:start
+endif
+if has('nvim') && get(g:, 'noweb_shadow', 1)
+      \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+  let s:route = 'lsp'
+  return col('.') - 1 - len(matchstr(l:before, '\k*$'))
+endif
+if exists('b:vimtex')
+  let s:route = 'tex'
+  return vimtex#complete#omnifunc(a:findstart, a:base)
+endif
+let s:route = ''
+return -3
+@
+
+<<produce the candidates for the routed target>>=
+if s:route ==# 'lsp'
+  return luaeval('require("noweb.shadow").complete(_A)', a:base)
+elseif s:route ==# 'tex'
+  return vimtex#complete#omnifunc(a:findstart, a:base)
+elseif s:route !=# 'chunk'
+  return []
+endif
+<<collect the matching chunk names>>
+@
+
+\subsection{Hover and definitions}
+\label{sec:hoverdef}
+
+[[K]] and [[gd]] get shadow-aware variants that fall back to the
+built-in behaviour ([['keywordprg']] and the local-declaration
+search) whenever the cursor is outside every shadow or the server
+has nothing to say---so the maps are safe buffer-wide, prose
+included.  Chunk references keep their own goto: \texttt{CTRL-]}
+through the tagfunc (\cref{sec:tagfunc}) is untouched.
+
+<<[[noweb#hover]] and [[noweb#definition]]>>=
+" K / gd with shadow-LSP answers inside code chunks, falling back to
+" the built-in behaviour elsewhere.
+function! noweb#hover() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
+    normal! K
+  endif
+endfunction
+
+function! noweb#definition() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
+    normal! gd
+  endif
+endfunction
+
+function! s:shadowed() abort
+  return has('nvim') && get(g:, 'noweb_shadow', 1)
+        \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+endfunction
+@
+
+<<the hover and definition maps>>=
+nnoremap <silent> <Plug>(noweb-hover) :<C-u>call noweb#hover()<CR>
+nnoremap <silent> <Plug>(noweb-definition) :<C-u>call noweb#definition()<CR>
+if !get(g:, 'noweb_no_maps', 0)
+  if !hasmapto('<Plug>(noweb-hover)', 'n')
+    nmap <buffer> K <Plug>(noweb-hover)
+  endif
+  if !hasmapto('<Plug>(noweb-definition)', 'n')
+    nmap <buffer> gd <Plug>(noweb-definition)
+  endif
+endif
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> K'
+      \ . ' | silent! nunmap <buffer> gd'
+@
+
+\subsection{VimTeX for the prose}
+\label{sec:vimtexprose}
+
+The prose of a noweb file \emph{is} a \TeX{} document, and VimTeX
+is the \TeX{} toolchain of choice: motions, text objects, the table
+of contents, delimiter matching, and the completion the router
+delegates to.  VimTeX only initializes itself for the [[tex]]
+filetype, but its entire per-buffer setup is one documented call
+away.  After it, two buffer-local options are taken back: VimTeX
+claims the omnifunc (ours routes to VimTeX's instead), and the
+tagfunc stays with chunk navigation.  Both undo scripts are
+preserved, chained.  [[g:noweb_vimtex]] opts out wholesale.
+
+<<initialize VimTeX for the prose>>=
+if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
+      \ && !empty(globpath(&runtimepath, 'autoload/vimtex.vim'))
+  let s:undo = b:undo_ftplugin
+  unlet b:undo_ftplugin
+  silent! call vimtex#init()
+  let b:undo_ftplugin = s:undo
+        \ . (empty(get(b:, 'undo_ftplugin', ''))
+        \    ? '' : ' | ' . b:undo_ftplugin)
+  setlocal omnifunc=noweb#complete
+  if exists('+tagfunc')
+    setlocal tagfunc=noweb#tagfunc
+  endif
+endif
+@
+
+\subsection{A tangled preview, in lockstep}
+\label{sec:preview}
+
+[[:NowebTangled]] shows the tangled program in a read-only split and
+keeps the two windows in lockstep.  What it shows is the \emph{build
+artifact}: the linemark markers are the machinery's bookkeeping, so
+the preview filters them out---a derived buffer holding exactly what
+[[notangle]] without the filter would produce, with the language's
+own syntax highlighting.  ([[g:noweb_tangled_markers = 1]] shows the
+raw shadow instead, markers and all.)  The filtering needs no second
+tangle: the marker set is known, so one pass derives the view and
+two small maps between view lines and tangled lines, and the
+cursor-sync lookups compose through them.
+
+Moving in the source moves the preview to the corresponding tangled
+line (the first splice, when the chunk is used several times);
+moving in the preview moves the source cursor through the reverse
+map, which is total on code lines.  Prose lines belong to no shadow,
+so the preview simply stays put while the cursor crosses them.
+
+The split obeys the usual command modifiers: plain [[:NowebTangled]]
+opens below ([[g:noweb_tangled_split]] changes that default), and
+[[:vertical NowebTangled]], [[:botright NowebTangled]] and friends
+do what they say---the modifiers, when given, replace the default
+wholesale.
+
+Two details keep the lockstep calm.  Cursor moves made with
+[[nvim_win_set_cursor]] into a \emph{non-current} window do not fire
+that window's [[CursorMoved]], so the two autocommands cannot
+ping-pong; a [[syncing]] flag guards the residual case (the user
+switching windows mid-update) anyway.  And the command toggles:
+running it again, or closing the preview window, tears the
+autocommands down.
+
+Naming the root should be forgiving: root chunks are conventionally
+named with [[[[...]]]] quoting, but nobody wants to type brackets on
+a command line, so an argument matches the root name exactly, the
+name with the quoting added, or the name with the quoting stripped
+(the command also completes root names).  Without an argument the
+command previews the root whose tangle holds the cursor line; a
+cursor on a chunk \emph{header} is resolved through the chunk's
+first body line, so \enquote{on a chunk} works the way it reads.
+Failing all that, a single root is used, and with several the error
+lists them.
+
+<<shadow: the synced preview>>=
+local preview = {}  -- preview[nwbuf] = { win, nwwin, sh, group }
+local syncing = false
+
+local function preview_close(nwbuf)
+  local p = preview[nwbuf]
+  if not p then
+    return
+  end
+  preview[nwbuf] = nil
+  pcall(vim.api.nvim_del_augroup_by_id, p.group)
+  if vim.api.nvim_win_is_valid(p.win) then
+    pcall(vim.api.nvim_win_close, p.win, true)
+  end
+  if p.pbuf ~= p.sh.buf and vim.api.nvim_buf_is_valid(p.pbuf) then
+    pcall(vim.api.nvim_buf_delete, p.pbuf, { force = true })
+  end
+end
+
+-- The marker-free view of a shadow: fill pbuf with the non-marker
+-- lines and return the two composition maps (view line <-> tangled
+-- line; a marker maps forward to the next kept line).
+local function refresh_view(pbuf, sh)
+  local lines = vim.api.nvim_buf_get_lines(sh.buf, 0, -1, false)
+  local view, pv2t, t2pv = {}, {}, {}
+  for t, line in ipairs(lines) do
+    if sh.marker[t] then
+      t2pv[t] = #view + 1
+    else
+      table.insert(view, line)
+      pv2t[#view] = t
+      t2pv[t] = #view
+    end
+  end
+  for t, pv in pairs(t2pv) do
+    if pv > #view then
+      t2pv[t] = #view
+    end
+  end
+  vim.bo[pbuf].modifiable = true
+  vim.api.nvim_buf_set_lines(pbuf, 0, -1, false, view)
+  vim.bo[pbuf].modifiable = false
+  return pv2t, t2pv
+end
+
+local function strip_quotes(name)
+  return (name:gsub('%[%[', ''):gsub('%]%]', ''))
+end
+
+local function preview_pick(st, root, lnum)
+  if root and root ~= '' then
+    if st.roots[root] then
+      return st.roots[root]
+    end
+    for name, sh in pairs(st.roots) do
+      if name == '[[' .. root .. ']]' or strip_quotes(name) == root then
+        return sh
+      end
+    end
+    return nil
+  end
+  local only, n, holder = nil, 0, nil
+  for _, sh in pairs(st.roots) do
+    n = n + 1
+    only = sh
+    if sh.fwd[lnum] or sh.fwd[lnum + 1] then
+      holder = sh
+    end
+  end
+  return holder or (n == 1 and only or nil)
+end
+
+-- Root names of the current buffer's shadows, for command completion.
+function M.roots()
+  local st = M.sync(vim.api.nvim_get_current_buf())
+  local out = {}
+  for name in pairs(st and st.roots or {}) do
+    table.insert(out, name)
+  end
+  table.sort(out)
+  return out
+end
+
+function M.preview(root, mods)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  if preview[nwbuf] then
+    preview_close(nwbuf)
+    return
+  end
+  local st = M.sync(nwbuf)
+  if not st then
+    return
+  end
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = preview_pick(st, root, lnum)
+  if not sh then
+    vim.notify('noweb: name the root: :NowebTangled <root>  ('
+      .. table.concat(M.roots(), ', ') .. ')', vim.log.levels.WARN)
+    return
+  end
+  local show, pv2t, t2pv = sh.buf, nil, nil
+  if vim.g.noweb_tangled_markers ~= 1 then
+    show = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(show,
+      shadow_name(nwbuf, sh.root) .. ' (tangled)')
+    pv2t, t2pv = refresh_view(show, sh)
+    vim.bo[show].filetype = sh.cfg.filetype
+  else
+    vim.bo[show].modifiable = false
+  end
+  local nwwin = vim.api.nvim_get_current_win()
+  if mods and mods ~= '' then
+    vim.cmd(mods .. ' split')
+  else
+    vim.cmd(vim.g.noweb_tangled_split or 'rightbelow split')
+  end
+  local pwin = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(pwin, show)
+  vim.wo[pwin].cursorline = true
+  local group = vim.api.nvim_create_augroup('noweb-preview:' .. nwbuf, {})
+  preview[nwbuf] = { win = pwin, nwwin = nwwin, sh = sh, group = group,
+                     pbuf = show, pv2t = pv2t, t2pv = t2pv }
+  <<shadow: the two cursor-sync autocommands>>
+  local t = sh.fwd[lnum]
+  if t then
+    vim.api.nvim_win_set_cursor(pwin, { t2pv and t2pv[t] or t, 0 })
+    vim.api.nvim_win_call(pwin, function() vim.cmd('normal! zz') end)
+  end
+  vim.api.nvim_set_current_win(nwwin)
+end
+@
+
+<<shadow: the two cursor-sync autocommands>>=
+vim.api.nvim_create_autocmd('CursorMoved', {
+  group = group,
+  buffer = nwbuf,
+  callback = function()
+    local p = preview[nwbuf]
+    if syncing or not p or not vim.api.nvim_win_is_valid(p.win) then
+      return
+    end
+    local t = p.sh.fwd[vim.api.nvim_win_get_cursor(0)[1]]
+    if t then
+      syncing = true
+      vim.api.nvim_win_set_cursor(p.win, { p.t2pv and p.t2pv[t] or t, 0 })
+      vim.api.nvim_win_call(p.win, function() vim.cmd('normal! zz') end)
+      syncing = false
+    end
+  end,
+})
+vim.api.nvim_create_autocmd('CursorMoved', {
+  group = group,
+  buffer = show,
+  callback = function()
+    local p = preview[nwbuf]
+    if syncing or not p or not vim.api.nvim_win_is_valid(p.nwwin) then
+      return
+    end
+    local l = vim.api.nvim_win_get_cursor(0)[1]
+    local s = p.sh.src[p.pv2t and p.pv2t[l] or l]
+    if s then
+      syncing = true
+      vim.api.nvim_win_set_cursor(p.nwwin, { s, 0 })
+      vim.api.nvim_win_call(p.nwwin, function() vim.cmd('normal! zz') end)
+      syncing = false
+    end
+  end,
+})
+vim.api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  pattern = tostring(pwin),
+  callback = function()
+    preview_close(nwbuf)
+  end,
+})
+@
+
+\subsection{Building through nolinemap}
+\label{sec:nowebmake}
+
+For everything a language server does not cover---running the
+program, a linter, a type checker---noweb's \texttt{nolinemap}
+already solves the mapping problem at the process level: it runs a
+command and rewrites every file-and-line reference in its output to
+point into the [[.nw]] source, columns included.  [[:NowebMake
+python3 %]] tangles the root under the cursor to a temporary file
+([[%]] stands for it), runs the command through nolinemap, and
+loads the rewritten messages into the quickfix list---which then
+jumps straight into the noweb source.
+
+The tangle here reads the \emph{file}, not the buffer: the markers
+must carry the real path for nolinemap's rewriting to name it, so
+the command insists on a saved buffer, exactly like [[:make]].
+The output gets the same repairs as the shadows---junctions
+rejoined, continuation-severing markers dropped---so the compiler
+sees the real program; the markers that remain are whole-line
+comments nolinemap reads exactly as we do (a dropped marker costs
+nolinemap some precision around that splice, the price of handing
+it valid code).
+
+<<shadow: quickfix through nolinemap>>=
+function M.make(cmd)
+  local nwbuf = vim.api.nvim_get_current_buf()
+  if vim.bo[nwbuf].modified then
+    vim.notify('noweb: save the buffer first; :NowebMake builds the file',
+      vim.log.levels.WARN)
+    return
+  end
+  local st = M.sync(nwbuf)
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local sh = st and preview_pick(st, nil, lnum)
+  if not sh then
+    vim.notify('noweb: no typed root here', vim.log.levels.WARN)
+    return
+  end
+  local nwfile = vim.api.nvim_buf_get_name(nwbuf)
+  local tmp = vim.fn.tempname() .. (sh.root:match('%.%w+$') or '')
+  local tangle = vim.system({ 'sh', '-c', string.format(
+    'notangle %s -filter "linemark %s-c \'%s\'" -R\'%s\' \'%s\' > \'%s\'',
+    table.concat(sh.cfg.tangle or {}, ' '),
+    eager_flag(), sh.cfg.leader, sh.root, nwfile, tmp) }):wait()
+  if tangle.code ~= 0 and vim.fn.getfsize(tmp) <= 0 then
+    vim.notify('noweb: tangling failed: ' .. (tangle.stderr or ''),
+      vim.log.levels.ERROR)
+    return
+  end
+  vim.fn.writefile(
+    (parse_maps(rejoin_splices(vim.fn.readfile(tmp), sh.cfg.leader),
+                sh.cfg.leader, {})), tmp)
+  local run = vim.system(
+    { 'sh', '-c', 'nolinemap ' .. cmd:gsub('%%', tmp) .. ' 2>&1' },
+    { text = true }):wait()
+  vim.fn.setqflist({}, ' ', {
+    title = 'NowebMake: ' .. cmd,
+    lines = vim.split(run.stdout or '', '\n'),
+    efm = '%*[ ]File "%f"\\, line %l%.%#,'
+      .. '%f:%l:%c: %m,%f:%l: %m,%-G%.%#',
+  })
+  vim.cmd('copen | wincmd p')
+end
+@
+
+\subsection{Hooking the shadows into the buffer}
+
+The ftplugin starts the machinery on Neovim unless the user opts
+out; everything degrades gracefully when notangle (or linemark) is
+missing---the module simply produces no shadows, and the plugin is
+back to its v1.6.1 feature set.
+
+<<start the shadow machinery>>=
+if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
+  lua require('noweb.shadow').setup(0)
+  command! -buffer -nargs=? -complete=customlist,noweb#tangled_roots
+        \ NowebTangled
+        \ call luaeval('require("noweb.shadow").preview(_A[1], _A[2])',
+        \              [<q-args>, <q-mods>])
+  command! -buffer -nargs=+ NowebMake
+        \ call luaeval('require("noweb.shadow").make(_A)', <q-args>)
+  let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebTangled'
+        \ . ' | silent! delcommand -buffer NowebMake'
+endif
 @
 
 \section{Building and maintaining}

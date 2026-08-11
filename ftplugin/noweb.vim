@@ -33,3 +33,42 @@ endif
 let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
       \ . ' | silent! nunmap <buffer> [c'
       \ . ' | silent! delcommand -buffer NowebRefs'
+
+nnoremap <silent> <Plug>(noweb-hover) :<C-u>call noweb#hover()<CR>
+nnoremap <silent> <Plug>(noweb-definition) :<C-u>call noweb#definition()<CR>
+if !get(g:, 'noweb_no_maps', 0)
+  if !hasmapto('<Plug>(noweb-hover)', 'n')
+    nmap <buffer> K <Plug>(noweb-hover)
+  endif
+  if !hasmapto('<Plug>(noweb-definition)', 'n')
+    nmap <buffer> gd <Plug>(noweb-definition)
+  endif
+endif
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> K'
+      \ . ' | silent! nunmap <buffer> gd'
+
+if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
+  lua require('noweb.shadow').setup(0)
+  command! -buffer -nargs=? -complete=customlist,noweb#tangled_roots
+        \ NowebTangled
+        \ call luaeval('require("noweb.shadow").preview(_A[1], _A[2])',
+        \              [<q-args>, <q-mods>])
+  command! -buffer -nargs=+ NowebMake
+        \ call luaeval('require("noweb.shadow").make(_A)', <q-args>)
+  let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebTangled'
+        \ . ' | silent! delcommand -buffer NowebMake'
+endif
+
+if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
+      \ && !empty(globpath(&runtimepath, 'autoload/vimtex.vim'))
+  let s:undo = b:undo_ftplugin
+  unlet b:undo_ftplugin
+  silent! call vimtex#init()
+  let b:undo_ftplugin = s:undo
+        \ . (empty(get(b:, 'undo_ftplugin', ''))
+        \    ? '' : ' | ' . b:undo_ftplugin)
+  setlocal omnifunc=noweb#complete
+  if exists('+tagfunc')
+    setlocal tagfunc=noweb#tagfunc
+  endif
+endif

@@ -48,6 +48,70 @@ lists them all.  `]c` / `[c` step through every occurrence
 `<Plug>(noweb-next-occurrence)` / `<Plug>(noweb-prev-occurrence)`
 maps to keys of your own.
 
+## Language intelligence in chunks (Neovim)
+
+On Neovim, every *typed root chunk* (a chunk named like a file,
+defined but never used) gets an **invisible tangled shadow buffer**,
+kept in sync with the live `.nw` and served to a language server.
+Results map back into the noweb source:
+
+- **diagnostics** appear on the offending chunk lines as you type —
+  no write needed;
+- **completion** inside a chunk comes from the language server
+  (through the same omnifunc, so YCM and friends pick it up; `.`
+  triggers it);
+- **`K`** shows hover documentation, **`gd`** jumps to a definition —
+  landing in the right chunk of the `.nw`, even across chunks.  With
+  no language server, `gd` falls back to language-aware definition
+  patterns over the whole tangle (shell functions, `def`/`class`,
+  make targets, …; tune via `definitions` in `g:noweb_languages`);
+- **`:NowebTangled`** opens the tangled code read-only in a split,
+  cursor-synced in both directions with the source (toggle to
+  close).  It shows the build artifact — the line-marker comments
+  are filtered out (`g:noweb_tangled_markers = 1` shows them) — with
+  the language's syntax highlighting.  Horizontal below by default;
+  `:vert NowebTangled` (and the other split modifiers) work as
+  usual, and `g:noweb_tangled_split` changes the default;
+- **`:NowebMake {cmd}`** tangles the root under the cursor, runs
+  `{cmd}` (`%` = the tangled file) through noweb's `nolinemap`, and
+  fills the quickfix list with positions in the `.nw`.
+
+The prose gets the full [VimTeX](https://github.com/lervag/vimtex)
+treatment when VimTeX is installed: motions, text objects, TOC, and
+`\cite`/`\ref` completion routed through the same omnifunc.  Set
+`g:noweb_vimtex = 0` to opt out.
+
+Out of the box the shadow machinery covers the languages noweb
+ships `autodefs` filters for — Python (with jedi-language-server),
+shell (sh/zsh/bash), make, C, C++, Haskell, Java, Rust, TeX, Icon,
+Pascal, yacc — plus Lua and Lean; the serverless `gd` patterns port
+each autodefs recognizer's rules.
+
+Chunk languages come from the same inference the `autolang` weave
+filter uses, including its name-pattern rules: chunks named like
+`test [[foo.py]]`, `test [[foo.sh]]` or `test [[Makefile]]` are
+typed by default (matching the makefiles repository's default
+`-langrule` weave flags), and `g:noweb_langrules` prepends your own
+`[pattern, filetype]` pairs — first match wins:
+
+```vim
+let g:noweb_langrules = [['^check \[\[.*\.py\]\]', 'python']]
+```
+
+This needs the `linemark`/`nolinemap` tools from the
+[dbosk/noweb](https://github.com/dbosk/noweb) fork (`contrib/dbosk`)
+on `PATH` alongside `notangle`, and a language server per language:
+`jedi-language-server` is the Python default (`pipx install
+jedi-language-server`); Lean works through lean.nvim's own setup by
+filetype.  Configure languages via `g:noweb_languages`, e.g.
+
+```vim
+let g:noweb_languages = #{ python: #{ lsp: ['pyright-langserver', '--stdio'] } }
+```
+
+Set `g:noweb_shadow = 0` to disable the machinery entirely; plain
+Vim keeps the v1.6.1 feature set.
+
 ## Hacking
 
 The source of truth is `vim-noweb.nw` — a literate program from which

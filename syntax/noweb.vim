@@ -2,8 +2,8 @@
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-09
-" Version:		1.6.1
+" Date:			2026-08-10
+" Version:		1.7
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,18 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.7: Language intelligence in chunks (Neovim): invisible tangled
+"       shadow buffers (notangle -filter linemark) with language
+"       servers attached -- diagnostics, completion, K hover and gd
+"       goto-def inside code chunks, mapped back into the .nw; the
+"       omnifunc routes between chunk names, the LSP and VimTeX,
+"       which now initializes for the prose; :NowebTangled lockstep
+"       preview; :NowebMake through nolinemap.  Name-pattern language
+"       rules mirror noweave's -langrule (test [[x.py]] chunks etc.;
+"       g:noweb_langrules).  Chunk references highlight inside the
+"       included languages' own constructs (a sh here-doc rule used
+"       to swallow them), and mid-line chunk splices are rejoined so
+"       shadows match the real tangle.
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by

@@ -45,6 +45,16 @@ let s:interpreters = {
 
 let s:CONFLICT = "\x00conflict\x00"
 
+" Name-pattern rules, checked before everything else (mirrors
+" autolang's -langrule, values as Vim filetypes).  The defaults track
+" the makefiles repository's default weave; g:noweb_langrules
+" prepends user rules, first match wins.
+let s:LANGRULES = [
+      \ ['^test \[\[.*\.py\]\]', 'python'],
+      \ ['^test \[\[.*\.sh\]\]', 'sh'],
+      \ ['^test \[\[Makefile\]\]', 'make'],
+      \ ]
+
 " Ask the editor's filetype database for ARGS, e.g. {'filename': ...}
 " or {'filename': ..., 'contents': [...]}.  Returns '' when there is
 " no answer or no database to ask.
@@ -90,9 +100,16 @@ function! s:detect_in_scratch(args) abort
 endfunction
 
 " Return the Vim syntax name for chunk NAME, or '' if its name says nothing.
-" The name may use noweb's [[...]] quoting and may contain directory
-" separators; only the basename decides (mirrors lexer_for_chunk).
+" A g:noweb_langrules/s:LANGRULES rule matching the whole name wins;
+" otherwise the name may use noweb's [[...]] quoting and may contain
+" directory separators, and only the basename decides (mirrors
+" autolang's lexer_for_chunk).
 function! s:lexer_for_chunk(name) abort
+  for l:rule in get(g:, 'noweb_langrules', []) + s:LANGRULES
+    if a:name =~# l:rule[0]
+      return l:rule[1]
+    endif
+  endfor
   let l:name = a:name
   if l:name =~# '^\[\[.*\]\]$'
     let l:name = l:name[2:-3]
@@ -295,11 +312,19 @@ function! noweb#refresh() abort
   " Must be (re)defined after every :syntax include above: at the same
   " start position the last-defined item wins (:h syn-priority), which is
   " what lets chunk refs beat e.g. shHereDoc's <<-pattern inside sh chunks.
-  " First/last name chars must be non-space, so `cat <<EOF >> log` stays a
-  " here-doc.  syntax clear keeps the group id (contains= refs stay valid)
-  " while preventing pattern accumulation across refreshes.
+  " containedin= lets that tie happen anywhere inside the included
+  " languages' own items (sh's if-statements, strings, ...), where the
+  " contains= lists of our regions do not reach.  First/last name chars
+  " must be non-space, so `cat <<EOF >> log` stays a here-doc.  syntax
+  " clear keeps the group id (contains= refs stay valid) while preventing
+  " pattern accumulation across refreshes.
   silent! syntax clear nowebChunkRef
-  syntax match nowebChunkRef /<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/ contained contains=nowebTT
+  let l:incl = join(map(sort(filter(values(b:noweb_included),
+        \ 'v:val !=# ""')), '"@" . v:val'), ',')
+  execute 'syntax match nowebChunkRef'
+        \ '/<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/'
+        \ 'contained contains=nowebTT'
+        \ (l:incl ==# '' ? '' : 'containedin=' . l:incl)
 
   " Included syntax files install buffer-global sync rules (pythonSync
   " grouphere on ^def, make's groupthere on ^[^\t#], small minlines) that
@@ -317,6 +342,8 @@ endfunction
 let s:DEF = '^<<\zs.\{-1,}\ze>>=\s*$'
 let s:REF = '<<\zs\%([^ ]\|[^ ].\{-}[^ ]\)\ze>>'
 let s:HOT = '<<\|^@\%( \|$\)'
+
+let s:route = ''
 
 " Chunk references on one line as [name, start, end] triples, with
 " 0-based byte indices of the name between the brackets.  The @-escape
@@ -406,15 +433,36 @@ function! s:chunk_at_cursor() abort
   return ''
 endfunction
 
-" Omnifunc completing chunk names after << (:h complete-functions).
+" Omnifunc routing by context (:h complete-functions): chunk names
+" after <<, the shadow's language server inside a code chunk,
+" VimTeX in prose.  See the routing chunks in the language-
+" intelligence section.
 function! noweb#complete(findstart, base) abort
   if a:findstart
     let l:before = strpart(getline('.'), 0, col('.') - 1)
     let l:start = matchend(l:before, '.*@\@1<!<<')
-    if l:start < 0 || stridx(l:before, '>', l:start) >= 0
-      return -3
+    if l:start >= 0 && stridx(l:before, '>', l:start) < 0
+      let s:route = 'chunk'
+      return l:start
     endif
-    return l:start
+    if has('nvim') && get(g:, 'noweb_shadow', 1)
+          \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+      let s:route = 'lsp'
+      return col('.') - 1 - len(matchstr(l:before, '\k*$'))
+    endif
+    if exists('b:vimtex')
+      let s:route = 'tex'
+      return vimtex#complete#omnifunc(a:findstart, a:base)
+    endif
+    let s:route = ''
+    return -3
+  endif
+  if s:route ==# 'lsp'
+    return luaeval('require("noweb.shadow").complete(_A)', a:base)
+  elseif s:route ==# 'tex'
+    return vimtex#complete#omnifunc(a:findstart, a:base)
+  elseif s:route !=# 'chunk'
+    return []
   endif
   let l:occ = s:chunk_occurrences()
   let l:close = getline('.')[col('.') - 1] ==# '>' ? '' : '>>'
@@ -500,4 +548,39 @@ function! s:no_chunk() abort
   echohl WarningMsg
   echomsg 'noweb: no chunk name under the cursor'
   echohl None
+endfunction
+
+" Accessors for the Lua shadow module (lua/noweb/shadow.lua): the
+" occurrence inventory and the chunk-language map of this buffer.
+function! noweb#occurrences() abort
+  return s:chunk_occurrences()
+endfunction
+
+function! noweb#languages() abort
+  return s:infer_languages()
+endfunction
+
+" Command completion for :NowebTangled: the shadow root names.
+function! noweb#tangled_roots(arglead, cmdline, cursorpos) abort
+  return filter(luaeval('require("noweb.shadow").roots()'),
+        \ 'stridx(v:val, a:arglead) >= 0')
+endfunction
+
+" K / gd with shadow-LSP answers inside code chunks, falling back to
+" the built-in behaviour elsewhere.
+function! noweb#hover() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
+    normal! K
+  endif
+endfunction
+
+function! noweb#definition() abort
+  if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
+    normal! gd
+  endif
+endfunction
+
+function! s:shadowed() abort
+  return has('nvim') && get(g:, 'noweb_shadow', 1)
+        \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
 endfunction
