@@ -145,4 +145,5 @@ if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
   if exists('+tagfunc')
     setlocal tagfunc=noweb#tagfunc
   endif
+  call noweb#vimtex_syntax()
 endif
