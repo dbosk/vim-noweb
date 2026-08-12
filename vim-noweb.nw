@@ -1603,11 +1603,18 @@ imperceptible---and the [[match()]] loop remains as the fallback for
 Vim, where the worst noweb sources in practice cost tens of
 milliseconds, once per edit-then-query.
 
-The dispatcher in [[s:chunk_occurrences]] chooses between the two
-and normalizes the Lua result: [[luaeval]] converts an empty Lua table
-to an empty \emph{dictionary}, so a chunk with uses but no
-definitions (or vice versa) would come back with the wrong type
-where a list is expected.  Setting [[g:noweb_scan_vimscript]] forces
+The dispatcher in [[s:chunk_occurrences]] chooses between the two and
+normalizes the Lua result.  Lua writes lists and maps alike as tables,
+so an empty one carries no trace of which it meant to be, and
+[[luaeval]] resolves the ambiguity the only way it can: every empty
+table arrives as an empty \emph{list}.  For the [[uses]] of a chunk
+that is never used that is the right answer by luck, but for the
+result of a buffer with no chunks at all it is the wrong one---a
+dictionary is expected there, and [[values()]] on a list is [[E1206]],
+which aborted the scan before the buffer had finished loading.  So the
+outer value is coerced because Neovim gets it wrong, and the inner
+ones because a later Neovim need not resolve the ambiguity the same
+way.  Setting [[g:noweb_scan_vimscript]] forces
 the fallback on Neovim; the test suite uses it to hold the two
 implementations to identical output, and it doubles as an escape
 hatch.
@@ -1625,12 +1632,17 @@ function! s:chunk_occurrences() abort
   endif
   if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
     let l:occ = luaeval('require("noweb.scan")()')
-    " luaeval turns an empty Lua table into a dict; lists are expected.
+    " luaeval cannot tell an empty Lua map from an empty list and
+    " returns a list for both, so a buffer with no chunks arrives as []
+    " where a dict is expected -- values() on it is E1206.
+    if type(l:occ) != v:t_dict
+      let l:occ = {}
+    endif
     for l:e in values(l:occ)
-      if type(l:e.defs) == v:t_dict
+      if type(l:e.defs) != v:t_list
         let l:e.defs = []
       endif
-      if type(l:e.uses) == v:t_dict
+      if type(l:e.uses) != v:t_list
         let l:e.uses = []
       endif
     endfor
