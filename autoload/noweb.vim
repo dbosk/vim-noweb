@@ -492,12 +492,17 @@ function! s:chunk_occurrences() abort
   endif
   if has('nvim') && !get(g:, 'noweb_scan_vimscript', 0)
     let l:occ = luaeval('require("noweb.scan")()')
-    " luaeval turns an empty Lua table into a dict; lists are expected.
+    " luaeval cannot tell an empty Lua map from an empty list and
+    " returns a list for both, so a buffer with no chunks arrives as []
+    " where a dict is expected -- values() on it is E1206.
+    if type(l:occ) != v:t_dict
+      let l:occ = {}
+    endif
     for l:e in values(l:occ)
-      if type(l:e.defs) == v:t_dict
+      if type(l:e.defs) != v:t_list
         let l:e.defs = []
       endif
-      if type(l:e.uses) == v:t_dict
+      if type(l:e.uses) != v:t_list
         let l:e.uses = []
       endif
     endfor
