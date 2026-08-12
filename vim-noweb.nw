@@ -157,12 +157,14 @@ decision below traces back to one of them:
 \begin{description}
 \item[Definition order is priority.]  When several syntax items can
   start at the same position, the \emph{last defined} wins
-  (\texttt{:h syn-priority}).  We exploit this deliberately, twice:
-  the language-aware regions are built after the fallback region, so
-  a chunk header starts a language region rather than the fallback
-  (\cref{sec:fallback,sec:refresh}); and the item marking chunk
+  (\texttt{:h syn-priority}).  We exploit this deliberately, three
+  times: the language-aware regions are built after the fallback
+  region, so a chunk header starts a language region rather than the
+  fallback (\cref{sec:fallback,sec:refresh}); the item marking chunk
   references inside code is redefined after every included language,
-  so it beats that language's lookalike patterns (\cref{sec:refresh}).
+  so it beats that language's lookalike patterns (\cref{sec:refresh});
+  and the file-input rule VimTeX is missing is defined after the \TeX{}
+  base, so it beats the generic command match (\cref{sec:inputminted}).
 \item[Included syntaxes are hostile guests.]  [[:syntax include]]
   imports another filetype's rules wholesale, and some of them misfire
   on noweb markup.  The shell syntax, for instance, reads [[@<<word]]
@@ -212,6 +214,8 @@ links, and finally the hand-over to the language-inference machinery.
 
 <<load the \TeX{} base syntax>>
 
+<<[[\inputminted]], which VimTeX does not know>>
+
 <<quoting and chunk-name markup>>
 
 <<recover quoting stolen by \TeX{} option arguments>>
@@ -255,7 +259,11 @@ ignores it but archaeologists should not have to run [[git log]].
 "       g:noweb_langrules).  Chunk references highlight inside the
 "       included languages' own constructs (a sh here-doc rule used
 "       to swallow them), and mid-line chunk splices are rejoined so
-"       shadows match the real tangle.
+"       shadows match the real tangle.  Minted and pycode environments
+"       in the prose highlight too: vimtex looks for a document's
+"       packages in a main .tex file, which a .nw buffer does not
+"       have, so we hand it the languages the buffer actually uses --
+"       and define the \inputminted rule vimtex has never had.
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
@@ -333,6 +341,56 @@ if version < 600
 else
   runtime! syntax/tex.vim
   unlet b:current_syntax
+endif
+@
+
+\subsection{The one minted command VimTeX lacks}
+\label{sec:inputminted}
+
+VimTeX highlights [[\lstinputlisting]], listings' file-input command,
+but has no rule at all for minted's [[\inputminted]]---the command that
+pulls a whole source file into the document, and the one that sets the
+license page of this very document.  Lacking a rule it falls back to
+the generic command match, so its arguments stay ordinary prose: the
+filename is spell-checked like English, and the language name is not
+marked as anything.
+
+The four items mirror the shape VimTeX gives [[\includegraphics]]: a
+command match handing off to an optional-argument region, and from
+there to the arguments in order.  Only the last of them is VimTeX's own
+[[texFileArg]]; the language name gets a group of its own because it is
+neither a filename nor \TeX{}, and its [[contains]] is emptied so that
+nothing at all matches inside it.  Both new groups link to VimTeX's, so
+they inherit whatever the colour scheme says about file arguments
+rather than inventing a colour of their own.
+
+Coming after the base syntax, these items also win the tie against the
+generic [[texCmd]] that would otherwise claim the command
+(\cref{sec:overview}).  There is no such tie with VimTeX's own
+[[\input]] rule: its trailing [[\>]] demands a word boundary, which the
+[[m]] of \enquote{minted} denies it.
+
+Testing for [[texFileArg]] is not a roundabout way of asking whether
+VimTeX is installed.  It asks the question that actually matters: were
+VimTeX's core rules loaded \emph{into this buffer}---which is at once
+what the [[nextgroup]] below needs to name and what makes the
+[[vimtex#syntax#core#]] constructors safe to call.
+
+<<[[\inputminted]], which VimTeX does not know>>=
+" \inputminted[opts]{lang}{file}: vimtex has a rule for
+" \lstinputlisting but none for this one.  texFileArg exists only once
+" vimtex's core rules have loaded into this buffer, so testing for it
+" both skips the plain-tex.vim case and tells us the core constructors
+" below are available.
+if hlexists('texFileArg')
+  syntax match texCmdInput '\\inputminted\>'
+        \ nextgroup=nowebMintedOpt,nowebMintedLang skipwhite skipnl
+  call vimtex#syntax#core#new_opt('nowebMintedOpt',
+        \ {'next': 'nowebMintedLang'})
+  call vimtex#syntax#core#new_arg('nowebMintedLang',
+        \ {'contains': '', 'next': 'texFileArg'})
+  hi def link nowebMintedOpt  texFileOpt
+  hi def link nowebMintedLang texFileArg
 endif
 @
 
@@ -590,6 +648,12 @@ happens to be pedagogical order as well:
 <<[[s:infer_languages]]>>
 
 <<[[s:include_lang]]>>
+
+<<[[s:minted_db]]>>
+
+<<[[s:minted_register]]>>
+
+<<[[noweb#vimtex_syntax]]>>
 
 <<[[noweb#refresh]]>>
 
@@ -1096,15 +1160,20 @@ endfunction
 \label{sec:refresh}
 
 [[noweb#refresh()]] is the entry point the syntax file calls; it
-re-infers everything and rebuilds all per-language items.  Its five
-phases run in a fixed order, and the last two exist purely because of
-the invariants of \cref{sec:overview}: the chunk-reference item must
-be defined after every include, and the sync policy must be restated
-after every include.
+re-infers everything and rebuilds all per-language items.  Its six
+phases run in a fixed order.  The first one stands apart: it may
+conclude that the buffer needs its syntax loaded afresh, in which case
+this run is abandoned and the reload's own call does the work.  The
+last two exist purely because of the invariants of
+\cref{sec:overview}: the chunk-reference item must be defined after
+every include, and the sync policy must be restated after every
+include.
 
 <<[[noweb#refresh]]>>=
 " Re-infer chunk languages and (re)build the per-language syntax regions.
 function! noweb#refresh() abort
+  <<hand VimTeX its package state>>
+
   <<reset per-buffer region state>>
 
   <<bucket chunk names by language>>
@@ -1115,6 +1184,26 @@ function! noweb#refresh() abort
 
   <<sync from the start>>
 endfunction
+@
+
+The first phase belongs to a different story---the packages VimTeX
+cannot discover for itself, \cref{sec:vimtexpackages}---and appears
+here only because a write can change which languages the prose sets in
+minted.  Teaching VimTeX about a new one takes effect only while a
+syntax is being loaded, so when that happens the phase loads it again
+and this run is abandoned.  The reload calls [[noweb#refresh()]] anew;
+that call finds the state already correct and falls through to the
+work below.  What makes the recursion stop after exactly one round is
+that the phase records the new state \emph{before} reloading, so the
+second call has nothing left to change.
+
+<<hand VimTeX its package state>>=
+" May reload the syntax -- and so re-enter this function -- when the
+" set of minted languages in the prose changed; the reload redoes
+" everything below, so this run has nothing left to do.
+if noweb#vimtex_syntax()
+  return
+endif
 @
 
 The reset clears the previous refresh's regions by group name.
@@ -3020,6 +3109,11 @@ claims the omnifunc (ours routes to VimTeX's instead), and the
 tagfunc stays with chunk navigation.  Both undo scripts are
 preserved, chained.  [[g:noweb_vimtex]] opts out wholesale.
 
+Initializing VimTeX is not quite the same as being a \TeX{} file to
+it, though, and the difference costs the prose some highlighting.  The
+last call repairs it; \cref{sec:vimtexpackages} explains what it is
+repairing.
+
 <<initialize VimTeX for the prose>>=
 if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
       \ && !empty(globpath(&runtimepath, 'autoload/vimtex.vim'))
@@ -3033,6 +3127,223 @@ if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
   if exists('+tagfunc')
     setlocal tagfunc=noweb#tagfunc
   endif
+  call noweb#vimtex_syntax()
+endif
+@
+
+\subsection{The packages VimTeX cannot see}
+\label{sec:vimtexpackages}
+
+A minted environment in the prose---and this document is full of
+them---comes out unhighlighted: no shell, no Python, not even the flat
+grey of a verbatim block.  The reason is worth following to the end,
+because it is also why [[pycode]] blocks stay plain, and why no amount
+of configuration fixes either of them.
+
+VimTeX loads the syntax for a package only when it believes the
+document uses that package, and it settles the question by parsing the
+preamble of the project's \emph{main file}.  Which file that is, it
+decides by extension: [[tex]], [[latex]], [[dtx]], [[tikz]], [[ins]].
+A [[.nw]] file is none of them, so VimTeX concludes that this project
+has no main file at all---and the empty string parses into an empty
+list of packages.  Every package test then fails, minted's among them,
+and the groups that would have highlighted those environments are
+never defined.  Nothing reports an error, because an empty document
+and a document that uses no packages are indistinguishable.
+
+Handing VimTeX this file as the main one would clear that up and
+introduce a worse problem, since the same field tells VimTeX's
+compiler and table of contents which file to work on, and a [[.nw]]
+file is not one they can compile.  It would not even settle the
+question here: the noweb style loads minted for us, as
+[[\usepackage[minted]{noweb}]], and VimTeX reads package names from
+the braces rather than the options.  Reading the buffer is the better
+source in any case.  A document should highlight the languages that
+are written in it, not the ones its preamble happens to name.
+
+So we do from the buffer the two things VimTeX would have done from
+the preamble: name the packages, and supply the language database that
+minted's own syntax would have built.  The second has a hook waiting
+for it.  Minted's parser opens by returning if the database is already
+there---a guard written for idempotence, which serves just as well for
+substitution.
+
+\emph{When} we may do this is decided elsewhere.  VimTeX's dispatcher
+runs inside [[runtime! syntax/tex.vim]], which is to say inside our own
+syntax file; the ftplugin that calls us runs before or after that
+depending on whether the user's vimrc enables filetype plugins before
+syntax highlighting.  Arriving early, we need only leave the state
+where the coming load will find it.  Arriving late, the load has been
+and gone, and the only way back inside one is to start another.
+
+Loading the package by hand would be the obvious shortcut, and is the
+wrong one.  It performs [[:syntax include]] outside a syntax load, and
+VimTeX ends such an include by restoring its own [[syn sync]]
+settings---undoing the sync-from-start policy that \cref{sec:refresh}
+calls the single biggest reliability fix in the plugin---and by
+declaring [[b:current_syntax]] to be [[tex]].  Loading the syntax
+afresh costs one more pass over a small file and leaves neither mess
+behind.
+
+The scan itself reuses minted's own patterns, pointed at the buffer
+instead of at a file tree.  Option lists grow long enough to wrap in
+practice, so the environment is allowed to spill its options across
+lines, as VimTeX allows.
+
+Running on every write puts the scan in the same company as the
+occurrence scan of \cref{sec:luascan}, and under the same obligation
+not to cost anything noticeable.  It gets there by observing that
+whatever a document is about, almost none of its lines are minted
+constructs: a substring test rejects those, and the regexes only ever
+run on the handful that survive.  On this document that is fifty lines
+out of some three thousand seven hundred, and nine milliseconds on a
+write where the regexes alone had cost eighty.
+
+Two constructs are deliberately left out.
+[[\inputminted]] names a language whose code lives in another file, so
+a region for it here could never match anything---its own markup is
+\cref{sec:inputminted}'s business.  The [[\newminted]] family, which
+mints fresh environment names from a language, is not handled at all:
+following it means duplicating more of VimTeX's parser, and the price
+of skipping it is that those environments stay verbatim-plain.
+
+<<[[s:minted_db]]>>=
+" The minted languages this buffer uses, in the shape vimtex's minted
+" syntax expects.  The patterns are vimtex's own, read from the buffer
+" instead of from a project's file tree.  \inputminted is deliberately
+" not scanned: its code lives in another file, so a region for its
+" language could never match anything here.
+function! s:minted_db() abort
+  let l:db = {}
+  let l:in_opt = 0
+  for l:line in getline(1, '$')
+    " This runs on every write, and almost no line of a document is a
+    " minted construct: the substring test keeps the regexes off them.
+    " A line continuing an option list is exempt -- the language may
+    " well be all that is left of the construct on it.
+    if !l:in_opt && stridx(l:line, 'mint') < 0
+      continue
+    endif
+    if l:in_opt
+      " An option list left open on the line before: the language
+      " follows whichever ] closes it.
+      if s:minted_register(l:db, matchstr(l:line, '\]\s*{\zs\w\+\ze}'))
+        let l:in_opt = 0
+      endif
+      continue
+    endif
+    if l:line =~# '\\begin{minted}\s*\[[^\]]*$'
+      let l:in_opt = 1
+      continue
+    endif
+    call s:minted_register(l:db, matchstr(l:line,
+          \ '\\begin{minted}\%(\s*\[[^\]]*\]\)\?\s*{\zs\w\+\ze}'))
+    call s:minted_register(l:db, matchstr(l:line,
+          \ '\\mint\%(inline\)\?\%(\s*\[[^\]]*\]\)\?\s*{\zs\w\+\ze}'))
+  endfor
+  return l:db
+endfunction
+@
+
+\noindent
+The helper reports whether it registered anything, which is what tells
+the loop above that a wrapped option list has finally closed.  It
+strips dashes because VimTeX builds syntax group names out of the
+language name, and a group name cannot contain one.
+
+<<[[s:minted_register]]>>=
+" Register one language in the database, if there is one.  Dashes go
+" because vimtex builds group names out of the language name and a
+" dash cannot appear in one.  Returns whether a language was added.
+function! s:minted_register(db, lang) abort
+  if empty(a:lang)
+    return 0
+  endif
+  let a:db[substitute(a:lang, '-', '', 'g')]
+        \ = {'environments': [], 'commands': []}
+  return 1
+endfunction
+@
+
+Both packages are seeded only for buffers that actually use them, and
+that is not frugality for its own sake.  PythonTeX's loader opens by
+including the whole Python syntax, unconditionally; seeding it
+everywhere would put Python into every noweb buffer, [[pycode]] block
+or no.  A buffer that uses neither package behaves exactly as it did
+before this section existed.
+
+Which makes the test for use worth stating carefully.  PythonTeX's
+inline commands are counted only when an argument follows, because a
+document that merely \emph{discusses} them should not pay for Python
+---and the paragraph you are reading, in the file that defines the
+test, is exactly such a document.
+
+The return value carries the one fact the caller cannot work out for
+itself: whether the syntax was reloaded underneath it, and its own
+work therefore already redone.
+
+<<[[noweb#vimtex_syntax]]>>=
+" Give vimtex the buffer state its minted and pythontex syntax need:
+" it looks for packages in a project main file, which a .nw buffer
+" does not have (see the documentation).  Returns 1 when the syntax
+" had to be reloaded for that state to take effect, in which case the
+" caller's own syntax work has already been redone.
+function! noweb#vimtex_syntax() abort
+  if !get(g:, 'noweb_vimtex', 1) || !exists('b:vimtex')
+    return 0
+  endif
+  if !has_key(b:vimtex, 'syntax')
+    let b:vimtex.syntax = {}
+  endif
+  let l:changed = 0
+
+  let l:db = s:minted_db()
+  if !empty(l:db)
+    if get(b:vimtex.syntax, 'minted', {}) !=# l:db
+      let b:vimtex.syntax.minted = l:db
+      let l:changed = 1
+    endif
+    if !has_key(b:vimtex.packages, 'minted')
+      let b:vimtex.packages.minted = {}
+      let l:changed = 1
+    endif
+  endif
+
+  " pythontex's loader includes the whole Python syntax unconditionally,
+  " so only buffers that really use it should pay for it.  The inline
+  " commands count only with their argument attached, so that prose
+  " *about* \py does not trigger the include -- as it would in the
+  " document this very function is written in.
+  if !has_key(b:vimtex.packages, 'pythontex')
+        \ && search('\C\\begin{py\%(code\|block\)}\|\C\\py[bsc]\?[{#@]', 'cnw')
+    let b:vimtex.packages.pythontex = {}
+    let l:changed = 1
+  endif
+
+  <<reload the syntax if we arrived too late>>
+
+  return 0
+endfunction
+@
+
+\noindent
+Before the syntax has loaded there is nothing to do: the state is in
+place and the coming load will find it.  Afterwards, reloading is what
+puts us back inside a load---and it is safe to do from here precisely
+because the state was recorded first, so the refresh the reload
+triggers finds nothing left to change and does not reload again
+(\cref{sec:refresh}).
+
+<<reload the syntax if we arrived too late>>=
+" vimtex's dispatcher runs inside `runtime! syntax/tex.vim`, i.e. inside
+" our own syntax file.  Before that has happened, the pending load will
+" pick the state up by itself; afterwards, the only way back into a
+" syntax load is to start one.  Loading the packages by hand here
+" instead would re-impose vimtex's syn sync over ours (see refresh) and
+" leave b:current_syntax reading "tex".
+if l:changed && exists('b:current_syntax') && !empty(&l:syntax)
+  let &l:syntax = &l:syntax
+  return 1
 endif
 @
 

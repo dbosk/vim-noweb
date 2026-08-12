@@ -261,8 +261,114 @@ function! s:include_lang(lang) abort
   return l:cluster
 endfunction
 
+" The minted languages this buffer uses, in the shape vimtex's minted
+" syntax expects.  The patterns are vimtex's own, read from the buffer
+" instead of from a project's file tree.  \inputminted is deliberately
+" not scanned: its code lives in another file, so a region for its
+" language could never match anything here.
+function! s:minted_db() abort
+  let l:db = {}
+  let l:in_opt = 0
+  for l:line in getline(1, '$')
+    " This runs on every write, and almost no line of a document is a
+    " minted construct: the substring test keeps the regexes off them.
+    " A line continuing an option list is exempt -- the language may
+    " well be all that is left of the construct on it.
+    if !l:in_opt && stridx(l:line, 'mint') < 0
+      continue
+    endif
+    if l:in_opt
+      " An option list left open on the line before: the language
+      " follows whichever ] closes it.
+      if s:minted_register(l:db, matchstr(l:line, '\]\s*{\zs\w\+\ze}'))
+        let l:in_opt = 0
+      endif
+      continue
+    endif
+    if l:line =~# '\\begin{minted}\s*\[[^\]]*$'
+      let l:in_opt = 1
+      continue
+    endif
+    call s:minted_register(l:db, matchstr(l:line,
+          \ '\\begin{minted}\%(\s*\[[^\]]*\]\)\?\s*{\zs\w\+\ze}'))
+    call s:minted_register(l:db, matchstr(l:line,
+          \ '\\mint\%(inline\)\?\%(\s*\[[^\]]*\]\)\?\s*{\zs\w\+\ze}'))
+  endfor
+  return l:db
+endfunction
+
+" Register one language in the database, if there is one.  Dashes go
+" because vimtex builds group names out of the language name and a
+" dash cannot appear in one.  Returns whether a language was added.
+function! s:minted_register(db, lang) abort
+  if empty(a:lang)
+    return 0
+  endif
+  let a:db[substitute(a:lang, '-', '', 'g')]
+        \ = {'environments': [], 'commands': []}
+  return 1
+endfunction
+
+" Give vimtex the buffer state its minted and pythontex syntax need:
+" it looks for packages in a project main file, which a .nw buffer
+" does not have (see the documentation).  Returns 1 when the syntax
+" had to be reloaded for that state to take effect, in which case the
+" caller's own syntax work has already been redone.
+function! noweb#vimtex_syntax() abort
+  if !get(g:, 'noweb_vimtex', 1) || !exists('b:vimtex')
+    return 0
+  endif
+  if !has_key(b:vimtex, 'syntax')
+    let b:vimtex.syntax = {}
+  endif
+  let l:changed = 0
+
+  let l:db = s:minted_db()
+  if !empty(l:db)
+    if get(b:vimtex.syntax, 'minted', {}) !=# l:db
+      let b:vimtex.syntax.minted = l:db
+      let l:changed = 1
+    endif
+    if !has_key(b:vimtex.packages, 'minted')
+      let b:vimtex.packages.minted = {}
+      let l:changed = 1
+    endif
+  endif
+
+  " pythontex's loader includes the whole Python syntax unconditionally,
+  " so only buffers that really use it should pay for it.  The inline
+  " commands count only with their argument attached, so that prose
+  " *about* \py does not trigger the include -- as it would in the
+  " document this very function is written in.
+  if !has_key(b:vimtex.packages, 'pythontex')
+        \ && search('\C\\begin{py\%(code\|block\)}\|\C\\py[bsc]\?[{#@]', 'cnw')
+    let b:vimtex.packages.pythontex = {}
+    let l:changed = 1
+  endif
+
+  " vimtex's dispatcher runs inside `runtime! syntax/tex.vim`, i.e. inside
+  " our own syntax file.  Before that has happened, the pending load will
+  " pick the state up by itself; afterwards, the only way back into a
+  " syntax load is to start one.  Loading the packages by hand here
+  " instead would re-impose vimtex's syn sync over ours (see refresh) and
+  " leave b:current_syntax reading "tex".
+  if l:changed && exists('b:current_syntax') && !empty(&l:syntax)
+    let &l:syntax = &l:syntax
+    return 1
+  endif
+
+  return 0
+endfunction
+
 " Re-infer chunk languages and (re)build the per-language syntax regions.
 function! noweb#refresh() abort
+  " May reload the syntax -- and so re-enter this function -- when the
+  " set of minted languages in the prose changed; the reload redoes
+  " everything below, so this run has nothing left to do.
+  if noweb#vimtex_syntax()
+    return
+  endif
+
   if !exists('b:noweb_included')
     let b:noweb_included = {}
   endif

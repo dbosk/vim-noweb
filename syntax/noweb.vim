@@ -22,7 +22,11 @@
 "       g:noweb_langrules).  Chunk references highlight inside the
 "       included languages' own constructs (a sh here-doc rule used
 "       to swallow them), and mid-line chunk splices are rejoined so
-"       shadows match the real tangle.
+"       shadows match the real tangle.  Minted and pycode environments
+"       in the prose highlight too: vimtex looks for a document's
+"       packages in a main .tex file, which a .nw buffer does not
+"       have, so we hand it the languages the buffer actually uses --
+"       and define the \inputminted rule vimtex has never had.
 " v1.6.1: Register the YCM trigger at startup (plugin/noweb.vim) --
 "       YCM snapshots its options at VimEnter, so the ftplugin was
 "       too late for files opened mid-session.  Order candidates by
@@ -83,6 +87,22 @@ if version < 600
 else
   runtime! syntax/tex.vim
   unlet b:current_syntax
+endif
+
+" \inputminted[opts]{lang}{file}: vimtex has a rule for
+" \lstinputlisting but none for this one.  texFileArg exists only once
+" vimtex's core rules have loaded into this buffer, so testing for it
+" both skips the plain-tex.vim case and tells us the core constructors
+" below are available.
+if hlexists('texFileArg')
+  syntax match texCmdInput '\\inputminted\>'
+        \ nextgroup=nowebMintedOpt,nowebMintedLang skipwhite skipnl
+  call vimtex#syntax#core#new_opt('nowebMintedOpt',
+        \ {'next': 'nowebMintedLang'})
+  call vimtex#syntax#core#new_arg('nowebMintedLang',
+        \ {'contains': '', 'next': 'texFileArg'})
+  hi def link nowebMintedOpt  texFileOpt
+  hi def link nowebMintedLang texFileArg
 endif
 
 " containedin=tex.* lets these match even when a tex region has swallowed
