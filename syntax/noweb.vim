@@ -2,8 +2,8 @@
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-10
-" Version:		1.8
+" Date:			2026-08-12
+" Version:		1.8.1
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,11 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.1: gd on a chunk name -- a reference, or a <<name>>= header --
+"       goes to that chunk's first definition, in prose and in plain
+"       Vim as well; only off a chunk name is it still the shadow's
+"       goto-def.  It used to be the shadow's everywhere, which on a
+"       chunk name meant the built-in gd searching for one word of it.
 " v1.8: Editing in chunks: the ic/ac/iC/aC text objects and the
 "       ]] [[ ]m [m ][ [] motions; chunk-aware gq (each chunk filled
 "       within its own bounds, [[...]] quotes never broken) and

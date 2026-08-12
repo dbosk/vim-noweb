@@ -707,7 +707,8 @@ function! noweb#tangled_roots(arglead, cmdline, cursorpos) abort
 endfunction
 
 " K / gd with shadow-LSP answers inside code chunks, falling back to
-" the built-in behaviour elsewhere.
+" the built-in behaviour elsewhere.  A chunk name is answered before
+" either: it is the one piece of code the tangle has no line for.
 function! noweb#hover() abort
   if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
     normal! K
@@ -715,6 +716,11 @@ function! noweb#hover() abort
 endfunction
 
 function! noweb#definition() abort
+  let l:name = s:chunk_at_cursor()
+  if l:name !=# ''
+    call noweb#goto(l:name)
+    return
+  endif
   if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
     normal! gd
   endif
