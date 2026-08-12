@@ -132,8 +132,12 @@ let g:noweb_langrules = [['^check \[\[.*\.py\]\]', 'python']]
 ```
 
 This needs the `linemark`/`nolinemap` tools from the
-[dbosk/noweb](https://github.com/dbosk/noweb) fork (`contrib/dbosk`)
-on `PATH` alongside `notangle`, and a language server per language:
+[dbosk/noweb](https://github.com/dbosk/noweb) fork (`contrib/dbosk`).
+A normal `make install` there is enough: `nolinemap` has to be on
+`PATH` beside `notangle`, since the plugin runs it, but `linemark` is
+only ever named as a `notangle -filter`, and notangle puts its own
+`LIB` directory — where `linemark` installs — on `PATH` for filters.
+You also want a language server per language:
 `jedi-language-server` is the Python default (`pipx install
 jedi-language-server`); Lean works through lean.nvim's own setup by
 filetype.  Configure languages via `g:noweb_languages`, e.g.

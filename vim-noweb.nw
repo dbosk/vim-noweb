@@ -2352,6 +2352,15 @@ notangle arguments.  (The maps are indifferent either way---the
 column correction reads the actual leading whitespace of both
 lines.)
 
+Note also what does \emph{not} have to be arranged: linemark is named
+here as a filter and nowhere invoked, so it never needs to be on the
+user's [[PATH]].  notangle appends its own [[LIB]] directory to
+[[PATH]] before running a filter, and [[LIB]] is where
+[[contrib/dbosk]]'s [[make install]] puts linemark---so a normal
+install is enough.  nolinemap is the opposite case: the
+plugin execs it directly (\cref{sec:nowebmake}), and it does have to
+be findable.
+
 <<shadow: tangle one root with markers>>=
 local function tangle(nwbuf, root, cfg)
   local lines = vim.api.nvim_buf_get_lines(nwbuf, 0, -1, false)
@@ -4818,11 +4827,16 @@ it is actually written in.
 Highlighting, completion, navigation and everything in
 |noweb-editing| need nothing but Vim.
 
-|noweb-intelligence| needs Neovim, "notangle" on $PATH, and the
-"linemark" and "nolinemap" tools from the dbosk noweb fork
-(contrib/dbosk).  A language server per language is optional; without
-one the tangled preview, |:NowebMake| and a pattern-based `gd` still
-work.
+|noweb-intelligence| needs Neovim and the "linemark" and "nolinemap"
+tools from the dbosk noweb fork (contrib/dbosk).  "notangle" and
+"nolinemap" must be on $PATH, because the plugin runs them itself;
+"linemark" need only be installed where noweb keeps its filters (its
+LIB directory, which "make install" in contrib/dbosk writes to),
+since it is only ever reached as a "notangle -filter" and notangle
+puts LIB on $PATH for its filters.
+
+A language server per language is optional; without one the tangled
+preview, |:NowebMake| and a pattern-based `gd` still work.
 
 ==============================================================================
 2. Highlighting                                          *noweb-highlighting*
@@ -4994,7 +5008,7 @@ the same 'omnifunc'.  |g:noweb_vimtex| opts out.
 ==============================================================================
 7. Options                                                    *noweb-options*
 
-                                                        *g:noweb_chunk_options*
+                                                       *g:noweb_chunk_options*
 g:noweb_chunk_options   (default 1)  Give the buffer the chunk
                         language's editing options as the cursor
                         moves.  See |noweb-chunk-options|.
@@ -5032,15 +5046,15 @@ g:noweb_shadow          (default 1)  Enable |noweb-intelligence|.
                                                         *g:noweb_vimtex*
 g:noweb_vimtex          (default 1)  Initialize VimTeX for the prose.
 
-                                                        *g:noweb_tangled_split*
+                                                       *g:noweb_tangled_split*
 g:noweb_tangled_split   (default "rightbelow split")  Default split
                         for |:NowebTangled|.
 
-                                                        *g:noweb_tangled_markers*
+                                                     *g:noweb_tangled_markers*
 g:noweb_tangled_markers (default 0)  Show linemark's marker comments
                         in the |:NowebTangled| preview.
 
-                                                        *g:noweb_scan_vimscript*
+                                                      *g:noweb_scan_vimscript*
 g:noweb_scan_vimscript  (default 0)  Use the Vim script occurrence
                         scan on Neovim too.  An escape hatch.
 
