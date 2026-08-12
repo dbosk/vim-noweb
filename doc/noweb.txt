@@ -1,0 +1,275 @@
+*noweb.txt*     Literate programming with noweb            *noweb* *vim-noweb*
+
+Highlighting, navigation and editing for noweb literate programs
+(*.nw): TeX prose, noweb markup, and every code chunk in the language
+it is actually written in.
+
+1. Requirements ......................... |noweb-requirements|
+2. Highlighting ......................... |noweb-highlighting|
+3. Completion and navigation ............ |noweb-navigation|
+4. Editing in chunks .................... |noweb-editing|
+5. Language intelligence ................ |noweb-intelligence|
+6. Commands ............................. |noweb-commands|
+7. Options .............................. |noweb-options|
+8. Mappings ............................. |noweb-mappings|
+
+==============================================================================
+1. Requirements                                          *noweb-requirements*
+
+Highlighting, completion, navigation and everything in
+|noweb-editing| need nothing but Vim.
+
+|noweb-intelligence| needs Neovim, "notangle" on $PATH, and the
+"linemark" and "nolinemap" tools from the dbosk noweb fork
+(contrib/dbosk).  A language server per language is optional; without
+one the tangled preview, |:NowebMake| and a pattern-based `gd` still
+work.
+
+==============================================================================
+2. Highlighting                                          *noweb-highlighting*
+
+The whole buffer is TeX prose by default.  Chunk headers, chunk
+references and [[...]] quotes are marked as noweb markup, and each
+code chunk's body is highlighted in the chunk's own language.
+
+The language is inferred the way noweb's "autolang" weave filter does
+it: from filename-like chunk names, from #! lines, and by propagation
+along <<use>> edges, so a descriptively named chunk used by a typed
+root inherits the root's language.  Name and shebang lookups ask the
+editor's own filetype database, so every language the editor can
+detect is covered.
+
+Highlighting refreshes on every write.  |:NowebSyncLang| refreshes it
+on demand.  |g:noweb_langrules| adds name-pattern rules.
+
+==============================================================================
+3. Completion and navigation                              *noweb-navigation*
+
+                                                        *noweb-completion*
+Chunk names complete after "<<" through the buffer's 'omnifunc':
+|i_CTRL-X_CTRL-O| in plain Vim, and automatically in YouCompleteMe and
+any framework with an omnifunc bridge.  Completion reads the live
+buffer, so unsaved chunks are offered the moment they are typed.  It
+closes the ">>" unless it is already there, and the menu marks
+referenced-but-undefined names -- a quick way to spot a typo.  At a
+definition position the not-yet-defined names sort first.
+
+                                                        *noweb-tags*
+Chunk definitions resolve as tags through 'tagfunc'.  |CTRL-]| on a
+reference jumps to the definition, |:tnext| steps through the appends
+(a chunk defined several times has several tag matches), |CTRL-T|
+jumps back and |g]| lists them all.
+
+                                                        *noweb-occurrences*
+]c and [c step through every occurrence -- definition or use -- of the
+chunk under the cursor, wrapping.  |:NowebRefs| collects them all in
+the location list.  |:NowebGoto| jumps to a chunk by name, and
+|:NowebChunks| lists every definition in the file.
+
+==============================================================================
+4. Editing in chunks                                          *noweb-editing*
+
+                                                        *noweb-textobjects*
+Four linewise text objects, in operator-pending and visual mode:
+
+    ic      the chunk's content, without its header or its trailing
+            "@ %def" index declarations
+    ac      the whole chunk, markup included
+    iC      the content of the documentation/code pair
+    aC      the whole documentation/code pair
+
+A "pair" is noweb's unit of composition: a passage of prose and the
+code chunk it introduces.  From a code chunk, aC reaches back over the
+prose; from a documentation chunk, forward over the code.
+
+                                                        *noweb-motions*
+Six motions, all wrapping, all taking a count, all setting the |''|
+mark so that |CTRL-O| returns:
+
+    ]]      next chunk of either kind        [[      previous
+    ]m      next code chunk                  [m      previous
+    ][      next documentation chunk         []      previous
+
+                                                        *noweb-formatting*
+|gq| and |gw| understand chunks.  A range covering several chunks is
+split at the boundaries and each piece filled inside its own chunk, so
+"gqG" never joins a paragraph onto a chunk header; and because a sweep
+like that means "tidy the prose", code chunks in a multi-chunk range
+are left alone.  A range inside a single chunk is taken as deliberate
+and formatted whatever it is, so gqip over a run of comments in a code
+chunk rewraps them with their leaders.
+
+Blanks inside [[...]] quotes are protected for the duration of the
+fill, so a quote is never broken across two lines.
+
+|:NowebFillChunk| formats the whole chunk the cursor is in: filling it
+if it is prose, re-indenting it if it is code.
+
+                                                        *noweb-chunk-options*
+The buffer's editing options follow the cursor.  In a code chunk,
+'commentstring', 'comments', 'iskeyword', 'matchpairs', 'suffixesadd'
+and 'formatoptions' are the chunk language's own, so commenting
+plugins insert the right leader, |star| respects the language's word
+characters, and comment-aware |gq| works.  In prose they are TeX's.
+Set |g:noweb_chunk_options| to 0 to switch this off.
+
+                                                        *noweb-folding*
+With |g:noweb_fold| set, 'foldmethod' is "expr" and each chunk is one
+fold, labelled with its name and inferred language.  "zM" then "zv" is
+the closest thing Vim has to narrowing to a chunk.
+
+==============================================================================
+5. Language intelligence                                 *noweb-intelligence*
+
+Neovim only.  Every typed root chunk -- one named like a file, defined
+but never used -- gets an invisible tangled shadow buffer, kept in
+sync with the live .nw and served to a language server.  Results map
+back into the noweb source:
+
+- diagnostics appear on the offending chunk lines as you type;
+- completion inside a chunk comes from the language server, through
+  the same 'omnifunc';
+- `K` shows hover documentation and `gd` jumps to a definition,
+  landing in the right chunk even across chunks.  With no language
+  server, `gd` falls back to language-aware definition patterns over
+  the whole tangle;
+- |:NowebFillChunk| re-indents a code chunk with the language's own
+  indent script, run in the shadow;
+- |:NowebTangled| opens the tangled code read-only in a split, cursor
+  synced in both directions;
+- |:NowebMake| runs a command over the tangled file and fills the
+  quickfix list with positions in the .nw.
+
+Covered out of the box: the languages noweb ships "autodefs" filters
+for -- Python, shell, make, C, C++, Haskell, Java, Rust, TeX, Icon,
+Pascal, yacc -- plus Lua and Lean.  |g:noweb_languages| configures
+them; |g:noweb_shadow| switches the whole subsystem off.
+
+VimTeX, when installed, is initialized for the prose: motions, text
+objects, table of contents and \cite/\ref completion, routed through
+the same 'omnifunc'.  |g:noweb_vimtex| opts out.
+
+==============================================================================
+6. Commands                                                  *noweb-commands*
+
+                                                        *:NowebGoto*
+:NowebGoto [{name}]     Jump to the first definition of chunk {name},
+                        completing the name; with no argument, the
+                        chunk under the cursor.  Pushes the tag stack,
+                        so |CTRL-T| comes back.
+
+                                                        *:NowebChunks*
+:NowebChunks            Every chunk definition in file order, in the
+                        location list.
+
+                                                        *:NowebRefs*
+:NowebRefs              Every definition and use of the chunk under
+                        the cursor, in the location list.
+
+                                                        *:NowebNewChunk*
+:NowebNewChunk [{name}] Open a chunk below the cursor and put the
+                        cursor in its body.  With no argument, prompts
+                        for the name with completion -- so appending
+                        to an existing chunk is the same gesture.
+
+                                                        *:NowebFillChunk*
+:NowebFillChunk         Fill the current chunk if it is prose;
+                        re-indent it if it is code.
+
+                                                        *:NowebSyncLang*
+:NowebSyncLang          Re-infer chunk languages and rebuild the
+                        highlighting now, without writing.
+
+                                                        *:NowebTangled*
+:NowebTangled [{root}]  Open the tangled code for {root} read-only in
+                        a split, cursor-synced with the source; run it
+                        again to close.  Takes |:command-modifiers|,
+                        so ":vert NowebTangled" works.  Neovim only.
+
+                                                        *:NowebMake*
+:NowebMake {cmd}        Tangle the root under the cursor, run {cmd}
+                        ("%" is the tangled file) through nolinemap,
+                        and fill the quickfix list with positions in
+                        the .nw.  Needs a saved buffer.  Neovim only.
+
+==============================================================================
+7. Options                                                    *noweb-options*
+
+                                                        *g:noweb_chunk_options*
+g:noweb_chunk_options   (default 1)  Give the buffer the chunk
+                        language's editing options as the cursor
+                        moves.  See |noweb-chunk-options|.
+
+                                                        *g:noweb_fold*
+g:noweb_fold            (default 0)  Fold by chunk.
+
+                                                        *g:noweb_no_maps*
+g:noweb_no_maps         (default 0)  Install no default mappings at
+                        all.  The |<Plug>| names stay; see
+                        |noweb-mappings|.
+
+                                                        *g:noweb_langrules*
+g:noweb_langrules       (default [])  List of [pattern, filetype]
+                        pairs deciding a chunk's language from its
+                        name, tried before everything else, first
+                        match winning.  Mirrors noweave's -langrule. >
+                            let g:noweb_langrules =
+                                  \ [['^check \[\[.*\.py\]\]', 'python']]
+<
+                                                        *g:noweb_languages*
+g:noweb_languages       (default {})  Per-language configuration for
+                        |noweb-intelligence|, deep-merged over the
+                        defaults.  Keys are filetypes; each may set
+                        "lsp" (the server command), "leader" (the
+                        comment leader for linemark), "filetype" and
+                        "definitions". >
+                            let g:noweb_languages =
+                                  \ #{ python: #{ lsp: ['pyright-langserver',
+                                  \                     '--stdio'] } }
+<
+                                                        *g:noweb_shadow*
+g:noweb_shadow          (default 1)  Enable |noweb-intelligence|.
+
+                                                        *g:noweb_vimtex*
+g:noweb_vimtex          (default 1)  Initialize VimTeX for the prose.
+
+                                                        *g:noweb_tangled_split*
+g:noweb_tangled_split   (default "rightbelow split")  Default split
+                        for |:NowebTangled|.
+
+                                                        *g:noweb_tangled_markers*
+g:noweb_tangled_markers (default 0)  Show linemark's marker comments
+                        in the |:NowebTangled| preview.
+
+                                                        *g:noweb_scan_vimscript*
+g:noweb_scan_vimscript  (default 0)  Use the Vim script occurrence
+                        scan on Neovim too.  An escape hatch.
+
+==============================================================================
+8. Mappings                                                  *noweb-mappings*
+
+Default mappings, all buffer-local:
+
+    ic ac iC aC             |noweb-textobjects|
+    ]] [[ ]m [m ][ []       |noweb-motions|
+    ]c [c                   |noweb-occurrences|
+    K                       hover documentation (Neovim)
+    gd                      go to definition (Neovim)
+
+|g:noweb_no_maps| suppresses all of them.  Any one of them is also
+suppressed individually by binding its |<Plug>| name yourself: >
+
+    nmap <buffer> <Leader>n <Plug>(noweb-next-chunk)
+<
+The names are:
+
+    <Plug>(noweb-inner-chunk)       <Plug>(noweb-a-chunk)
+    <Plug>(noweb-inner-pair)        <Plug>(noweb-a-pair)
+    <Plug>(noweb-next-chunk)        <Plug>(noweb-prev-chunk)
+    <Plug>(noweb-next-code-chunk)   <Plug>(noweb-prev-code-chunk)
+    <Plug>(noweb-next-doc-chunk)    <Plug>(noweb-prev-doc-chunk)
+    <Plug>(noweb-next-occurrence)   <Plug>(noweb-prev-occurrence)
+    <Plug>(noweb-hover)             <Plug>(noweb-definition)
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:

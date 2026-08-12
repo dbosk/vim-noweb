@@ -48,6 +48,35 @@ lists them all.  `]c` / `[c` step through every occurrence
 `<Plug>(noweb-next-occurrence)` / `<Plug>(noweb-prev-occurrence)`
 maps to keys of your own.
 
+## Editing in chunks
+
+The buffer's editing options follow the cursor: inside a code chunk,
+`commentstring`, `comments`, `iskeyword`, `matchpairs`, `suffixesadd`
+and `formatoptions` are the chunk language's own, so a commenting
+plugin inserts `#` in a Python chunk and `%` in the prose.  Set
+`g:noweb_chunk_options = 0` to switch that off.
+
+Four linewise text objects — `ic`/`ac` for a chunk, `iC`/`aC` for a
+documentation/code pair — and six wrapping motions: `]]`/`[[` for any
+chunk, `]m`/`[m` for code chunks, `][`/`[]` for documentation chunks.
+
+`gq` understands chunks.  A range spanning several is split at the
+boundaries and each piece filled inside its own chunk, so `gqG` never
+joins a paragraph onto a chunk header — and since a sweep like that
+means "tidy the prose", it leaves code chunks alone.  Blanks inside
+`[[...]]` are protected, so a quote is never broken across two lines.
+`:NowebFillChunk` fills the current chunk if it is prose and
+re-indents it if it is code.
+
+`:NowebGoto` jumps to a chunk by name with completion (and pushes the
+tag stack, so `<C-t>` comes back), `:NowebChunks` lists every
+definition in the location list, and `:NowebNewChunk` opens a chunk —
+prompting for the name, with completion, so adding an append to an
+existing chunk is the same gesture.  `g:noweb_fold` folds by chunk,
+which is Vim's answer to Emacs's narrowing.
+
+Everything here works in plain Vim.  `:help noweb` has the details.
+
 ## Language intelligence in chunks (Neovim)
 
 On Neovim, every *typed root chunk* (a chunk named like a file,
@@ -75,6 +104,10 @@ Results map back into the noweb source:
 - **`:NowebMake {cmd}`** tangles the root under the cursor, runs
   `{cmd}` (`%` = the tangled file) through noweb's `nolinemap`, and
   fills the quickfix list with positions in the `.nw`.
+
+- **`:NowebFillChunk`** re-indents a code chunk with the language's
+  own indent script, run inside the shadow — the tangled buffer is the
+  only place that script can see the code the way the compiler will.
 
 The prose gets the full [VimTeX](https://github.com/lervag/vimtex)
 treatment when VimTeX is installed: motions, text objects, TOC, and
@@ -116,11 +149,11 @@ Vim keeps the v1.6.1 feature set.
 
 The source of truth is `vim-noweb.nw` — a literate program from which
 everything under `syntax/`, `autoload/`, `ftdetect/`, `ftplugin/`,
-`plugin/` and `lua/` tangles.  Do
-not edit the `.vim` files directly; edit the `.nw`, run `make`, and
-commit the `.nw` together with the re-tangled `.vim` files.  `make
-check` must pass: it verifies the root chunks and that the tangled
-files match the working tree.
+`plugin/`, `lua/` and `doc/` tangles.  Do
+not edit the tangled files directly; edit the `.nw`, run `make`, and
+commit the `.nw` together with them.  `make check` must pass: it
+verifies the root chunks and that the tangled files match the working
+tree.
 
 Two conventions keep the tangle exact (details in the woven document):
 every literal `<<` or `>>` inside a code chunk is escaped as `@<<` /

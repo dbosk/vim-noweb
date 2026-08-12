@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-10
-" Version:		1.7
+" Version:		1.8
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,15 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8: Editing in chunks: the ic/ac/iC/aC text objects and the
+"       ]] [[ ]m [m ][ [] motions; chunk-aware gq (each chunk filled
+"       within its own bounds, [[...]] quotes never broken) and
+"       :NowebFillChunk; the buffer's 'commentstring', 'comments',
+"       'iskeyword' and friends follow the cursor into a chunk and
+"       become the chunk language's own (g:noweb_chunk_options);
+"       folding by chunk (g:noweb_fold); :NowebGoto, :NowebChunks and
+"       :NowebNewChunk; and a real :help noweb.  Between them these
+"       close the gap where noweb's own Emacs mode was still ahead.
 " v1.7: Language intelligence in chunks (Neovim): invisible tangled
 "       shadow buffers (notangle -filter linemark) with language
 "       servers attached -- diagnostics, completion, K hover and gd

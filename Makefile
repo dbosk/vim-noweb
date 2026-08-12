@@ -7,7 +7,7 @@ NWSRC=	vim-noweb.nw
 TANGLED=	syntax/noweb.vim autoload/noweb.vim ftdetect/noweb.vim
 TANGLED+=	ftplugin/noweb.vim plugin/noweb.vim
 TANGLED+=	lua/noweb/scan.lua lua/noweb/shadow.lua
-TANGLED+=	LICENSE
+TANGLED+=	doc/noweb.txt LICENSE
 
 .PHONY: all
 all: ${TANGLED}
@@ -32,7 +32,7 @@ vim-noweb.pdf: vim-noweb.tex LICENSE
 .PHONY: check
 check: all
 	noroots ${NWSRC}
-	git diff --exit-code -- syntax autoload ftdetect ftplugin plugin lua LICENSE
+	git diff --exit-code -- syntax autoload ftdetect ftplugin plugin lua doc LICENSE
 
 .PHONY: clean
 clean:
