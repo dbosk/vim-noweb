@@ -734,6 +734,84 @@ function M.pattern_definition(nwbuf)
   return false
 end
 
+-- Leading whitespace of a line in display columns.  indent_width
+-- counts characters, which is exact everywhere the tangle copies the
+-- source's whitespace verbatim; an indenter does not.
+local function indent_columns(line, ts)
+  local w = 0
+  for c in (line:match('^[ \t]*') or ''):gmatch('.') do
+    w = (c == '\t') and (w + ts - (w % ts)) or (w + 1)
+  end
+  return w
+end
+
+-- Re-indent .nw lines first..last using the shadow's own indenter.
+-- Only the change in indentation crosses back: the shadow's text is
+-- the tangled code, not the source's.  Returns false when no shadow
+-- covers the range, so the caller can fall back to plain '='.
+function M.indent(nwbuf, first, last)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = M.sync(nwbuf)
+  if not st then
+    return false
+  end
+  local sh
+  for _, s in pairs(st.roots) do
+    if s.fwd[first] then
+      sh = s
+      break
+    end
+  end
+  if not sh or not vim.api.nvim_buf_is_valid(sh.buf) then
+    return false
+  end
+  local ts = vim.bo[nwbuf].tabstop
+  local nw = vim.api.nvim_buf_get_lines(nwbuf, first - 1, last, false)
+  local tline, splice = {}, {}
+  local tfirst, tlast
+  for i, line in ipairs(nw) do
+    local t = sh.fwd[first + i - 1]
+    if not t then
+      return false
+    end
+    local cur = vim.api.nvim_buf_get_lines(sh.buf, t - 1, t, false)[1] or ''
+    tline[i] = t
+    splice[i] = indent_columns(cur, ts) - indent_columns(line, ts)
+    tfirst = (not tfirst or t < tfirst) and t or tfirst
+    tlast = (not tlast or t > tlast) and t or tlast
+  end
+  for _, opt in ipairs({ 'expandtab', 'shiftwidth', 'tabstop', 'softtabstop' }) do
+    vim.bo[sh.buf][opt] = vim.bo[nwbuf][opt]
+  end
+  vim.bo[sh.buf].modifiable = true
+  local ok = pcall(function()
+    vim.api.nvim_buf_call(sh.buf, function()
+      vim.cmd(('silent keepjumps normal! %dGV%dG='):format(tfirst, tlast))
+    end)
+  end)
+  vim.bo[sh.buf].modifiable = false
+  if not ok then
+    return false
+  end
+  local expandtab = vim.bo[nwbuf].expandtab
+  local out = {}
+  for i, line in ipairs(nw) do
+    local t = vim.api.nvim_buf_get_lines(sh.buf, tline[i] - 1, tline[i], false)[1]
+    local body = line:gsub('^[ \t]*', '')
+    local want = math.max(0, indent_columns(t or '', ts) - splice[i])
+    if body == '' then
+      out[i] = ''
+    elseif expandtab then
+      out[i] = string.rep(' ', want) .. body
+    else
+      out[i] = string.rep('\t', math.floor(want / ts))
+        .. string.rep(' ', want % ts) .. body
+    end
+  end
+  vim.api.nvim_buf_set_lines(nwbuf, first - 1, last, false, out)
+  return true
+end
+
 function M.make(cmd)
   local nwbuf = vim.api.nvim_get_current_buf()
   if vim.bo[nwbuf].modified then

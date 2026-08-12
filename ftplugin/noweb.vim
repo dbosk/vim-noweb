@@ -34,6 +34,80 @@ let b:undo_ftplugin .= ' | silent! nunmap <buffer> ]c'
       \ . ' | silent! nunmap <buffer> [c'
       \ . ' | silent! delcommand -buffer NowebRefs'
 
+" ic / ac / iC / aC, in both the modes a text object serves.
+for [s:key, s:plug, s:args] in [
+      \ ['ic', 'inner-chunk', '0, 0'],
+      \ ['ac', 'a-chunk', '0, 1'],
+      \ ['iC', 'inner-pair', '1, 0'],
+      \ ['aC', 'a-pair', '1, 1']]
+  for s:mode in ['x', 'o']
+    execute s:mode . 'noremap <silent> <Plug>(noweb-' . s:plug . ') '
+          \ . ':<C-u>call noweb#textobj(' . s:args . ')<CR>'
+    if !get(g:, 'noweb_no_maps', 0)
+          \ && !hasmapto('<Plug>(noweb-' . s:plug . ')', s:mode)
+      execute s:mode . 'map <buffer> ' . s:key
+            \ . ' <Plug>(noweb-' . s:plug . ')'
+    endif
+  endfor
+  let b:undo_ftplugin .= ' | silent! xunmap <buffer> ' . s:key
+        \ . ' | silent! ounmap <buffer> ' . s:key
+endfor
+
+" ]] [[ ]m [m ][ [] -- structural movement, in the three modes a
+" motion serves.
+for [s:key, s:plug, s:args] in [
+      \ [']]', 'next-chunk', "1, '', v:count1"],
+      \ ['[[', 'prev-chunk', "-1, '', v:count1"],
+      \ [']m', 'next-code-chunk', "1, 'code', v:count1"],
+      \ ['[m', 'prev-code-chunk', "-1, 'code', v:count1"],
+      \ ['][', 'next-doc-chunk', "1, 'doc', v:count1"],
+      \ ['[]', 'prev-doc-chunk', "-1, 'doc', v:count1"]]
+  for s:mode in ['n', 'x', 'o']
+    execute s:mode . 'noremap <silent> <Plug>(noweb-' . s:plug . ') '
+          \ . ':<C-u>call noweb#next_chunk(' . s:args . ')<CR>'
+    if !get(g:, 'noweb_no_maps', 0)
+          \ && !hasmapto('<Plug>(noweb-' . s:plug . ')', s:mode)
+      execute s:mode . 'map <buffer> ' . s:key
+            \ . ' <Plug>(noweb-' . s:plug . ')'
+    endif
+  endfor
+  let b:undo_ftplugin .= ' | silent! nunmap <buffer> ' . s:key
+        \ . ' | silent! xunmap <buffer> ' . s:key
+        \ . ' | silent! ounmap <buffer> ' . s:key
+endfor
+
+unlet! s:key s:plug s:args s:mode
+
+setlocal formatexpr=noweb#format()
+command! -buffer NowebFillChunk call noweb#fill_chunk()
+let b:undo_ftplugin .= ' | setlocal formatexpr<'
+      \ . ' | silent! delcommand -buffer NowebFillChunk'
+
+if get(g:, 'noweb_chunk_options', 1)
+  augroup nowebChunkOptions
+    autocmd! * <buffer>
+    autocmd CursorMoved,CursorMovedI,BufEnter <buffer>
+          \ call noweb#chunk_options()
+  augroup END
+  let b:undo_ftplugin .= ' | silent! autocmd! nowebChunkOptions * <buffer>'
+        \ . ' | call noweb#chunk_options_reset()'
+endif
+
+if get(g:, 'noweb_fold', 0)
+  setlocal foldmethod=expr
+  setlocal foldexpr=noweb#foldexpr(v:lnum)
+  setlocal foldtext=noweb#foldtext()
+  let b:undo_ftplugin .= ' | setlocal foldmethod< foldexpr< foldtext<'
+endif
+
+command! -buffer -nargs=? -complete=customlist,noweb#chunk_names
+      \ NowebGoto call noweb#goto(<q-args>)
+command! -buffer NowebChunks call noweb#chunks()
+command! -buffer -nargs=? NowebNewChunk call noweb#new_chunk(<q-args>)
+let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebGoto'
+      \ . ' | silent! delcommand -buffer NowebChunks'
+      \ . ' | silent! delcommand -buffer NowebNewChunk'
+
 nnoremap <silent> <Plug>(noweb-hover) :<C-u>call noweb#hover()<CR>
 nnoremap <silent> <Plug>(noweb-definition) :<C-u>call noweb#definition()<CR>
 if !get(g:, 'noweb_no_maps', 0)

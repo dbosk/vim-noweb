@@ -1,5 +1,7 @@
 # The tangled .vim files ARE committed (the plugin must work from a
-# bare clone); only the woven document and LaTeX build debris are not.
+# bare clone); only the woven document, LaTeX build debris and the
+# help tags -- which :helptags rebuilds -- are not.
+doc/tags
 vim-noweb.tex
 vim-noweb.pdf
 ltxobj/

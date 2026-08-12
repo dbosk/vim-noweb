@@ -80,6 +80,9 @@ The plugin's lineage, version by version:
   shadow buffers with language servers attached, VimTeX for the
   prose, a lockstep tangled preview and quickfix through
   nolinemap (\cref{sec:shadow}).
+\item[v1.8] editing \emph{in} chunks: text objects, motions,
+  chunk-aware filling, per-chunk editing options and folding
+  (\cref{sec:editing}), and a help file (\cref{sec:helpfile}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -87,7 +90,7 @@ no code from v1.2 or earlier remains, only the file layout and the
 group names.
 
 Everything in this repository tangles from this file.  The plugin's
-seven files are the root chunks, named after their paths in the
+eight files are the root chunks, named after their paths in the
 plugin tree:
 
 \begin{itemize}
@@ -96,8 +99,9 @@ plugin tree:
 \item [[ftdetect/noweb.vim]],
 \item [[ftplugin/noweb.vim]],
 \item [[plugin/noweb.vim]],
-\item [[lua/noweb/scan.lua]], and
-\item [[lua/noweb/shadow.lua]];
+\item [[lua/noweb/scan.lua]],
+\item [[lua/noweb/shadow.lua]], and
+\item [[doc/noweb.txt]];
 \end{itemize}
 
 the [[LICENSE]] tangles from here as well
@@ -119,7 +123,7 @@ here.
 \section{Overview}
 \label{sec:overview}
 
-The plugin is seven small files with a one-way control flow:
+The plugin is eight small files with a one-way control flow:
 
 \begin{description}
 \item[\texttt{plugin/noweb.vim}] runs once at startup and registers
@@ -130,7 +134,9 @@ The plugin is seven small files with a one-way control flow:
 \item[\texttt{ftplugin/noweb.vim}] runs when that filetype is set and
   installs the buffer-local editing hooks: chunk names complete
   through the buffer's omnifunc and resolve as tags through its
-  tagfunc (\cref{sec:navigation}).
+  tagfunc (\cref{sec:navigation}), the chunk text objects, motions and
+  commands are bound, and [['formatexpr']] and the per-chunk editing
+  options are hooked up (\cref{sec:editing}).
 \item[\texttt{syntax/noweb.vim}] runs when that filetype's syntax is
   requested.  It loads Vim's \TeX{} syntax as the base---the whole
   buffer is prose by default---then defines the noweb markup items and
@@ -149,6 +155,9 @@ The plugin is seven small files with a one-way control flow:
   buffer per typed root chunk with a language server attached,
   mapping diagnostics, completions, hovers and definitions back
   into the [[.nw]] buffer (\cref{sec:shadow}; Neovim only).
+\item[\texttt{doc/noweb.txt}] is the help file
+  (\cref{sec:helpfile})---no code, but written here for the same
+  reason as the code: so that it cannot drift from what it describes.
 \end{description}
 
 Two invariants make the layering work, and almost every design
@@ -236,7 +245,7 @@ ignores it but archaeologists should not have to run [[git log]].
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-08-10
-" Version:		1.7
+" Version:		1.8
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -244,6 +253,15 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8: Editing in chunks: the ic/ac/iC/aC text objects and the
+"       ]] [[ ]m [m ][ [] motions; chunk-aware gq (each chunk filled
+"       within its own bounds, [[...]] quotes never broken) and
+"       :NowebFillChunk; the buffer's 'commentstring', 'comments',
+"       'iskeyword' and friends follow the cursor into a chunk and
+"       become the chunk language's own (g:noweb_chunk_options);
+"       folding by chunk (g:noweb_fold); :NowebGoto, :NowebChunks and
+"       :NowebNewChunk; and a real :help noweb.  Between them these
+"       close the gap where noweb's own Emacs mode was still ahead.
 " v1.7: Language intelligence in chunks (Neovim): invisible tangled
 "       shadow buffers (notangle -filter linemark) with language
 "       servers attached -- diagnostics, completion, K hover and gd
@@ -614,6 +632,60 @@ happens to be pedagogical order as well:
 <<[[noweb#occurrences]] and [[noweb#languages]] accessors>>
 
 <<[[noweb#hover]] and [[noweb#definition]]>>
+
+<<the chunk-boundary patterns>>
+
+<<the chunk-bounds memo>>
+
+<<[[s:chunk_bounds]]>>
+
+<<[[s:pair_bounds]]>>
+
+<<[[noweb#textobj]]>>
+
+<<[[noweb#next_chunk]]>>
+
+<<the code-quote pattern and its stand-in>>
+
+<<[[s:free_filler]]>>
+
+<<[[s:hide_quotes]]>>
+
+<<[[s:quote_open]]>>
+
+<<[[s:internal_format]]>>
+
+<<[[s:shadow_indent]]>>
+
+<<[[s:scratch_indent]]>>
+
+<<[[s:format_piece]]>>
+
+<<[[noweb#format]]>>
+
+<<[[noweb#fill_chunk]]>>
+
+<<the per-chunk options>>
+
+<<[[s:options_for]]>>
+
+<<[[s:doc_options]]>>
+
+<<[[noweb#chunk_options]]>>
+
+<<[[noweb#chunk_options_reset]]>>
+
+<<[[noweb#foldexpr]]>>
+
+<<[[noweb#foldtext]]>>
+
+<<[[noweb#chunk_names]]>>
+
+<<[[noweb#goto]]>>
+
+<<[[noweb#chunks]]>>
+
+<<[[noweb#new_chunk]]>>
 @
 
 <<autoload file header>>=
@@ -904,9 +976,22 @@ the collected graph:
 
 <<[[s:infer_languages]]>>=
 " Scan the buffer and return {chunk name -> Vim syntax name}.
+" Memoized on b:changedtick, like the occurrence scan
+" (\cref{sec:occurrences}): until v1.7 the only callers were the
+" syntax refresh and the shadow sync, both rare, but the per-chunk
+" editing options (\cref{sec:chunkopts}) and the fold text
+" (\cref{sec:folding}) ask on every cursor movement and every fold,
+" and a full buffer scan each time is a full buffer scan too many.
+" noweb#refresh clears the memo, so :NowebSyncLang re-infers even
+" when nothing has been edited.
 function! s:infer_languages() abort
+  if get(b:, 'noweb_langs_tick', -1) == b:changedtick
+    return b:noweb_langs
+  endif
   <<scan chunks for language seeds and uses>>
   <<propagate languages along use edges>>
+  let b:noweb_langs = l:langs
+  let b:noweb_langs_tick = b:changedtick
   return l:langs
 endfunction
 @
@@ -1122,6 +1207,11 @@ The reset clears the previous refresh's regions by group name.
 id valid, so items already referring to the group do not break.
 
 <<reset per-buffer region state>>=
+" A refresh is the one place that must not trust the inference memo:
+" :NowebSyncLang exists to re-infer after something outside the buffer
+" changed -- g:noweb_langrules, a newly installed syntax file -- with
+" b:changedtick untouched.
+unlet! b:noweb_langs_tick
 if !exists('b:noweb_included')
   let b:noweb_included = {}
 endif
@@ -1323,6 +1413,16 @@ let b:did_ftplugin = 1
 <<hook completion and navigation into the buffer>>
 
 <<the occurrence maps and the [[:NowebRefs]] command>>
+
+<<the chunk objects and motions>>
+
+<<the formatting hook and the [[:NowebFillChunk]] command>>
+
+<<follow the cursor with the chunk's options>>
+
+<<fold by chunk when asked>>
+
+<<the chunk commands>>
 
 <<the hover and definition maps>>
 
@@ -2045,6 +2145,10 @@ local state = {}
 
 <<shadow: LSP queries at the cursor>>
 
+<<shadow: measure indentation in columns>>
+
+<<shadow: indent a source range through the shadow>>
+
 <<shadow: quickfix through nolinemap>>
 
 <<shadow: setup>>
@@ -2247,6 +2351,15 @@ language whose build does tangle differently can say so:
 notangle arguments.  (The maps are indifferent either way---the
 column correction reads the actual leading whitespace of both
 lines.)
+
+Note also what does \emph{not} have to be arranged: linemark is named
+here as a filter and nowhere invoked, so it never needs to be on the
+user's [[PATH]].  notangle appends its own [[LIB]] directory to
+[[PATH]] before running a filter, and [[LIB]] is where
+[[contrib/dbosk]]'s [[make install]] puts linemark---so a normal
+install is enough.  nolinemap is the opposite case: the
+plugin execs it directly (\cref{sec:nowebmake}), and it does have to
+be findable.
 
 <<shadow: tangle one root with markers>>=
 local function tangle(nwbuf, root, cfg)
@@ -3007,6 +3120,171 @@ let b:undo_ftplugin .= ' | silent! nunmap <buffer> K'
       \ . ' | silent! nunmap <buffer> gd'
 @
 
+\subsection{Indenting through the shadow}
+\label{sec:shadowindent}
+
+Emacs's [[M-n q]] on a code chunk runs [[indent-region]] in the
+chunk's major mode.  We have no major mode to run it in
+(\cref{sec:chunkopts}), and \emph{that} is what the shadow is for: it
+is a buffer of the right filetype, with the language's own indent
+script attached, holding this very code.  So [[:NowebFillChunk]]
+(\cref{sec:fillchunk}) indents there and carries the answer back.
+
+Only the answer, and only the part of it that is indentation.  The
+shadow's text is the \emph{tangled} code---chunk uses expanded, marker
+comments interleaved---so its lines are not the source's lines and
+must not be copied over them.  What transfers is the \emph{change} in
+each line's leading whitespace, added to what the source line had.
+Each line's splice offset (how much deeper the tangle sits than the
+source, \cref{sec:shadow}) is measured before the indent and
+subtracted after, so a chunk keeps its own left margin no matter how
+deeply it happens to be spliced.
+
+This also decides what to indent \emph{with}.  A language server's
+range formatting would be the fancier answer and is the wrong one: it
+may insert or delete lines, and every line map here is an index into a
+fixed set of lines.  Vim's own [[=]] cannot change the line count, so
+the maps stay valid across the operation---the same reason Emacs
+reaches for [[indent-region]] rather than a reformatter.
+
+<<shadow: indent a source range through the shadow>>=
+-- Re-indent .nw lines first..last using the shadow's own indenter.
+-- Only the change in indentation crosses back: the shadow's text is
+-- the tangled code, not the source's.  Returns false when no shadow
+-- covers the range, so the caller can fall back to plain '='.
+function M.indent(nwbuf, first, last)
+  nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
+  local st = M.sync(nwbuf)
+  if not st then
+    return false
+  end
+  local sh
+  for _, s in pairs(st.roots) do
+    if s.fwd[first] then
+      sh = s
+      break
+    end
+  end
+  if not sh or not vim.api.nvim_buf_is_valid(sh.buf) then
+    return false
+  end
+  <<shadow: measure the splice offsets>>
+  <<shadow: run the language's indenter on the shadow>>
+  <<shadow: carry the new indentation back>>
+  return true
+end
+@
+
+Everywhere else in this module, whitespace can be counted in
+characters: the tangle reproduces the source's indentation verbatim,
+so both sides spell it the same way and [[indent_width]] comparing
+character counts is exact.  Re-indenting breaks that assumption---the
+indenter writes whatever the shadow's own options say, which need not
+be what the source used---so here, and only here, indentation is
+measured in display columns.
+
+<<shadow: measure indentation in columns>>=
+-- Leading whitespace of a line in display columns.  indent_width
+-- counts characters, which is exact everywhere the tangle copies the
+-- source's whitespace verbatim; an indenter does not.
+local function indent_columns(line, ts)
+  local w = 0
+  for c in (line:match('^[ \t]*') or ''):gmatch('.') do
+    w = (c == '\t') and (w + ts - (w % ts)) or (w + 1)
+  end
+  return w
+end
+@
+
+A line the map does not reach---a blank line notangle dropped, or one
+inside a chunk this root does not use---makes the whole range
+unmappable, and the caller falls back rather than indenting half of
+it.
+
+<<shadow: measure the splice offsets>>=
+local ts = vim.bo[nwbuf].tabstop
+local nw = vim.api.nvim_buf_get_lines(nwbuf, first - 1, last, false)
+local tline, splice = {}, {}
+local tfirst, tlast
+for i, line in ipairs(nw) do
+  local t = sh.fwd[first + i - 1]
+  if not t then
+    return false
+  end
+  local cur = vim.api.nvim_buf_get_lines(sh.buf, t - 1, t, false)[1] or ''
+  tline[i] = t
+  splice[i] = indent_columns(cur, ts) - indent_columns(line, ts)
+  tfirst = (not tfirst or t < tfirst) and t or tfirst
+  tlast = (not tlast or t > tlast) and t or tlast
+end
+@
+
+The shadow is [[nomodifiable]] so that nobody edits a buffer whose
+contents are about to be overwritten by the next sync; indenting it is
+exactly the case where we do mean to, briefly.  Whatever the indenter
+leaves behind is transient anyway---the next [[M.sync]] re-tangles the
+whole shadow from the [[.nw]].
+
+It indents with the [[.nw]] buffer's conventions, not its own.  A
+shadow is created by [[ensure_shadow]] with nothing said about
+[['shiftwidth']] or [['expandtab']], so left alone it would indent a
+two-space Lua program in eight-column tabs---and the answer that came
+back would be measured against a source that uses neither.
+
+<<shadow: run the language's indenter on the shadow>>=
+for _, opt in ipairs({ 'expandtab', 'shiftwidth', 'tabstop', 'softtabstop' }) do
+  vim.bo[sh.buf][opt] = vim.bo[nwbuf][opt]
+end
+vim.bo[sh.buf].modifiable = true
+local ok = pcall(function()
+  vim.api.nvim_buf_call(sh.buf, function()
+    vim.cmd(('silent keepjumps normal! %dGV%dG='):format(tfirst, tlast))
+  end)
+end)
+vim.bo[sh.buf].modifiable = false
+if not ok then
+  return false
+end
+@
+
+Rebuilding the source line means keeping its text and replacing its
+leading whitespace, in whatever the [[.nw]] buffer indents with---a
+literate program's tangled output has to preserve tabs
+(\cref{sec:building}), so guessing spaces would be a poor idea.  A
+blank line stays blank rather than acquiring an indent of its own.
+
+<<shadow: carry the new indentation back>>=
+local expandtab = vim.bo[nwbuf].expandtab
+local out = {}
+for i, line in ipairs(nw) do
+  local t = vim.api.nvim_buf_get_lines(sh.buf, tline[i] - 1, tline[i], false)[1]
+  local body = line:gsub('^[ \t]*', '')
+  local want = math.max(0, indent_columns(t or '', ts) - splice[i])
+  if body == '' then
+    out[i] = ''
+  elseif expandtab then
+    out[i] = string.rep(' ', want) .. body
+  else
+    out[i] = string.rep('\t', math.floor(want / ts))
+      .. string.rep(' ', want % ts) .. body
+  end
+end
+vim.api.nvim_buf_set_lines(nwbuf, first - 1, last, false, out)
+@
+
+<<[[s:shadow_indent]]>>=
+" Re-indent through the tangled shadow, which has the language's own
+" indent script; 0 when no shadow covers these lines and the caller
+" should fall back to a plain '='.
+function! s:shadow_indent(first, last) abort
+  if !has('nvim') || !get(g:, 'noweb_shadow', 1)
+    return 0
+  endif
+  return luaeval('require("noweb.shadow").indent(0, _A[1], _A[2])',
+        \ [a:first, a:last])
+endfunction
+@
+
 \subsection{VimTeX for the prose}
 \label{sec:vimtexprose}
 
@@ -3342,6 +3620,1472 @@ if has('nvim') && get(g:, 'noweb_shadow', 1) && executable('notangle')
   let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebTangled'
         \ . ' | silent! delcommand -buffer NowebMake'
 endif
+@
+
+\section{Editing in chunks}
+\label{sec:editing}
+
+Everything so far has been about \emph{understanding} the buffer: what
+language a chunk is in, where a name is defined, what a language
+server makes of the code.  This section is about \emph{editing} it,
+and it closes the one gap where noweb's own Emacs mode has been ahead
+of this plugin all along.
+
+That mode, \texttt{noweb-mode.el}, is a minor \enquote{meta} mode:
+after every command it looks at where point is and switches the
+buffer's \emph{major} mode to [[noweb-code-mode]] or
+[[noweb-doc-mode]], narrowing to the chunk first.  One trick, and
+chunk-aware marking, killing, filling and indenting all fall out of
+it, because they are the major mode's own commands operating on a
+buffer that has been made to look like a single-language file.  The
+price is steep---one code mode for the whole buffer, chosen by hand in
+a modeline; one chunk fontified at a time; no notion of what language
+anything is written in---which is why this plugin took the opposite
+route from v1.3 on: the filetype stays [[noweb]] forever and
+everything per-chunk is layered on top of it
+(\cref{sec:refresh,sec:shadow}).
+
+The layering wins what it set out to win.  What it never did was touch
+the buffer's \emph{editing} options, and the omission shows.  In a
+Python chunk [['commentstring']] is still \TeX{}'s, so a commenting
+plugin inserts [[%]].  [[gq]] reflows prose straight through a chunk
+header, and splits [[[[...]]]] quotes down the middle.  And there is
+no way at all to say \enquote{this chunk} to an operator.  What
+follows supplies that missing half---but in Vim's idiom rather than by
+transliterating Emacs: text objects and motions instead of
+mark/kill/copy commands, folds instead of narrowing, a
+[['formatexpr']] instead of a replacement for [[do-auto-fill]].
+
+\subsection{Where a chunk begins and ends}
+\label{sec:bounds}
+
+Every item in this section needs the same answer: which chunk is line
+$n$ in, and where does it start and stop?  The occurrence scan of
+\cref{sec:occurrences} walks the whole buffer to answer a global
+question; this is a local one, asked on every cursor movement
+(\cref{sec:chunkopts}), so it must cost two searches rather than a
+pass.
+
+Three patterns, not one, because noweb's [[@ %def]] line is genuinely
+ambiguous.  It is an index declaration---\enquote{this chunk defines
+these identifiers}---and it matches [[^@ ]], so it \emph{does} end the
+code chunk: a [[@<<name@>>]] written after it is prose, not a chunk
+use, and the scans of \cref{sec:infer,sec:occurrences} are right to
+leave code mode there.  But it plainly belongs to the chunk above it,
+and Emacs agrees: [[noweb-update-chunk-vector]] skips a run of
+[[@ %def]] lines before deciding what the next chunk is, and
+[[noweb-fill-chunk]] excludes them from the region it fills.  So a
+chunk gets two ends---the code proper, and the code plus its
+declarations---and the callers pick.
+
+<<the chunk-boundary patterns>>=
+" Where chunks begin and end.  s:DEFLINE starts a code chunk,
+" s:TEXTLINE a documentation chunk; together (s:HEAD) they are every
+" line a chunk can start on.  s:PCTDEF is noweb's index declaration:
+" it ends the code but belongs to the chunk, so s:BOUND -- where a
+" code body must stop -- includes it while s:HEAD does not.
+let s:DEFLINE = '^@<<.\{-1,}@>>=\s*$'
+let s:PCTDEF = '^@ %def\%( \|$\)'
+let s:TEXTLINE = '^@\%( %def\)\@!\%( \|$\)'
+let s:HEAD = s:DEFLINE . '\|' . s:TEXTLINE
+let s:BOUND = s:HEAD . '\|' . s:PCTDEF
+@
+
+The head is the nearest [[s:HEAD]] line at or above [[lnum]]---zero
+when the file opens with prose before any marker, which is legal and
+common.  From the head, one forward search for [[s:HEAD]] finds where
+the next chunk starts, and one for [[s:BOUND]] finds where this
+chunk's code stops; between the two lie the [[@ %def]] declarations,
+if any.  Both searches run with the cursor parked on the head and the
+[[n]] flag set, so neither disturbs the other, and the view is saved
+around the whole thing.
+
+<<[[s:chunk_bounds]]>>=
+" The chunk containing line lnum, as
+"   kind  'code' or 'doc'
+"   name  the chunk's name; '' for a documentation chunk
+"   head  its @<<name@>>= or @ line; 0 before the file's first marker
+"   body  its first line of content
+"   last  its last line of content
+"   end   its last line, "@ %def" declarations included
+" 'last' and 'end' differ only for a code chunk with declarations:
+" 'ic' stops at 'last', 'ac' runs to 'end'.
+function! s:chunk_bounds(lnum) abort
+  <<answer from the memo when the cursor has not left the chunk>>
+  let l:view = winsaveview()
+  try
+    call cursor(a:lnum, 1)
+    let l:head = search(s:HEAD, 'bcnW')
+    call cursor(max([l:head, 1]), 1)
+    let l:next = search(s:HEAD, 'nW')
+    let l:stop = search(s:BOUND, 'nW')
+  finally
+    call winrestview(l:view)
+  endtry
+  <<name the chunk and place its body>>
+  <<remember the bounds and return them>>
+endfunction
+@
+
+A documentation chunk's [[@]] line is markup when it is bare and prose
+when anything follows it---[[@ So much for the parser.]] is a first
+line of text, and an operator on the chunk's body should include it.
+A code chunk's header line is always markup.
+
+<<name the chunk and place its body>>=
+let l:code = l:head > 0 && getline(l:head) =~# s:DEFLINE
+let l:end = l:next > 0 ? l:next - 1 : line('$')
+let l:bounds = {
+      \ 'kind': l:code ? 'code' : 'doc',
+      \ 'name': l:code ? matchstr(getline(l:head), s:DEF) : '',
+      \ 'head': l:head,
+      \ 'body': l:head == 0 || (!l:code && getline(l:head) !~# '^@\s*$')
+      \         ? max([l:head, 1]) : l:head + 1,
+      \ 'last': l:stop > 0 ? min([l:stop - 1, l:end]) : l:end,
+      \ 'end': l:end,
+      \ }
+@
+
+The memo is one entry, not a dictionary of them: the caller that makes
+this hot is the cursor-movement hook, and it asks about the same chunk
+again and again until the cursor leaves it.  [[b:changedtick]] guards
+against an edit having moved the boundaries, exactly as it does for
+the occurrence scan (\cref{sec:occurrences}).
+
+<<answer from the memo when the cursor has not left the chunk>>=
+if get(s:memo, 'buf', -1) == bufnr('%') && s:memo.tick == b:changedtick
+      \ && a:lnum >= max([s:memo.bounds.head, 1])
+      \ && a:lnum <= s:memo.bounds.end
+  return s:memo.bounds
+endif
+@
+
+<<remember the bounds and return them>>=
+let s:memo = {'buf': bufnr('%'), 'tick': b:changedtick, 'bounds': l:bounds}
+return l:bounds
+@
+
+<<the chunk-bounds memo>>=
+" One-entry memo for s:chunk_bounds; see s:chunk_options.
+let s:memo = {}
+@
+
+\subsection{Chunk text objects}
+\label{sec:textobj}
+
+Emacs spends six commands and six key bindings on marking, killing and
+copying a chunk and a chunk \emph{pair}
+([[noweb-mark-chunk]], [[-kill-chunk]], [[-copy-chunk-as-kill]] and
+their uppercase pair variants).  Vim spends none: a text object is not
+an operation, it is an \emph{argument} to every operation the editor
+has, so [[dac]], [[yic]] and [[vaC]] cover all six, and [[gqic]],
+[[=ic]] and [[gcic]] come along uncounted.  This is the clearest case
+in the whole plugin where the Vim idiom is smaller \emph{and} does
+more.
+
+The objects are linewise.  A chunk is a run of whole lines by
+construction---its delimiters occupy the first column---and every
+operator worth applying to one wants it that way.
+
+\begin{description}
+\item[[[ic]]] the chunk's content: the body without the header or the
+  [[@ %def]] tail.
+\item[[[ac]]] the whole chunk, markup included.
+\item[[[iC]], [[aC]]] the same for the documentation/code
+  \emph{pair}, noweb's real unit of composition---a paragraph of prose
+  and the code it introduces.  This is Emacs's
+  [[noweb-chunk-pair-region]]: from a code chunk it reaches back over
+  the prose that introduces it, and from a documentation chunk it
+  reaches forward over the code that follows.
+\end{description}
+
+<<[[noweb#textobj]]>>=
+" The ic / ac / iC / aC text objects.  Linewise, and defined for both
+" operator-pending and visual mode by the same function.
+function! noweb#textobj(pair, around) abort
+  let l:c = s:chunk_bounds(line('.'))
+  if a:pair
+    let l:c = s:pair_bounds(l:c)
+  endif
+  let l:first = a:around ? max([l:c.head, 1]) : l:c.body
+  let l:last = a:around ? l:c.end : l:c.last
+  if l:last < l:first
+    " An empty chunk has no inside to select.
+    return
+  endif
+  call cursor(l:first, 1)
+  normal! V
+  call cursor(l:last, 1)
+endfunction
+@
+
+Reaching for the other half of the pair is a chunk-bounds query one
+line outside the current chunk---and \enquote{the code that follows}
+may be several documentation chunks away, so that direction loops.  It
+stops at the end of the file rather than running off it: an unpaired
+trailing documentation chunk is just itself.
+
+<<[[s:pair_bounds]]>>=
+" Extend a chunk to its documentation/code pair: back over the prose
+" that introduces a code chunk, or forward to the code a documentation
+" chunk introduces (Emacs's noweb-chunk-pair-region).
+function! s:pair_bounds(c) abort
+  if a:c.kind ==# 'code'
+    if a:c.head <= 1
+      return a:c
+    endif
+    let l:doc = s:chunk_bounds(a:c.head - 1)
+    return extend(copy(a:c), {'head': l:doc.head, 'body': l:doc.body})
+  endif
+  let l:code = a:c
+  while l:code.kind !=# 'code' && l:code.end < line('$')
+    let l:code = s:chunk_bounds(l:code.end + 1)
+  endwhile
+  return extend(copy(a:c), {'last': l:code.last, 'end': l:code.end})
+endfunction
+@
+
+\subsection{Chunk motions}
+\label{sec:chunkmotions}
+
+\texttt{]c} and \texttt{[c} (\cref{sec:refs}) step through the
+occurrences of one \emph{name}.  What Emacs also has, and this plugin
+did not, is plain structural movement: next chunk, next code chunk,
+next documentation chunk, and their reverses---six commands under
+\texttt{M-n}.  In Vim they are bracket motions, and the family already
+has conventional members to borrow: \texttt{]{]}} and
+\texttt{[{[}} move by section, \texttt{]m} and \texttt{[m} by
+\enquote{method}, and \texttt{][} and \texttt{[]} to a section's
+other end.  A noweb source has no C sections or methods for those keys
+to mean anything else, so:
+
+\begin{description}
+\item[Either kind:] \texttt{]{]}} and \texttt{[{[}}.
+\item[Code chunks:] \texttt{]m} and \texttt{[m}---the useful one, and
+  the reason \texttt{]m} rather than a second section motion.
+\item[Documentation chunks:] \texttt{][} and \texttt{[]}.
+\end{description}
+
+(The braces in \texttt{]{]}} are for the weave, not the reader: a
+literal \texttt{[}\texttt{[} in prose would open a noweb code quote
+that runs until the next \texttt{]}\texttt{]}, and a \texttt{]}
+inside an \texttt{\char`\\item} label would end the label.  This
+document's own conventions, \cref{sec:building}, cover the angle
+brackets; the square ones bite exactly once, here.)
+
+They take a count, they wrap, and they set the [['']] mark first, so
+\texttt{CTRL-O} comes back---all three exactly as
+[[noweb#next_occurrence]] (\cref{sec:refs}) does, because a motion
+that behaves differently from its neighbour is worse than no motion.
+Wrapping is where we part company with Emacs, whose TODO list still
+asks for it.
+
+<<[[noweb#next_chunk]]>>=
+" The ]] / [[ / ]m / [m / ][ / [] motions: the count'th next (dir > 0)
+" or previous chunk of the given kind, wrapping.
+function! noweb#next_chunk(dir, kind, count) abort
+  let l:pat = a:kind ==# 'code' ? s:DEFLINE
+        \ : a:kind ==# 'doc' ? s:TEXTLINE : s:HEAD
+  normal! m'
+  for l:i in range(max([a:count, 1]))
+    call search(l:pat, a:dir > 0 ? 'w' : 'bw')
+  endfor
+endfunction
+@
+
+\subsection{Filling prose that has code in it}
+\label{sec:format}
+
+[[gq]] in a noweb source is wrong twice over.  It reflows straight
+through a chunk header, because [[@<<name@>>=]] is not a paragraph
+break to Vim; and it breaks lines inside [[[[...]]]] quotes, turning
+one code fragment into two and stranding a [[]]]] at the start of a
+line.  Emacs has had an answer since v2.11:
+[[noweb-fill-chunk]] narrows to the chunk before filling, and
+[[noweb-hide-code-quotes]] blanks out the quotes' contents so the
+filler cannot misread code punctuation as prose.
+
+Vim's hook for this is [['formatexpr']], which every formatting
+command routes through---[[gq]], [[gw]], and the automatic wrapping
+that [['formatoptions']] drives.  It is handed a range in [[v:lnum]]
+and [[v:count]] and returns non-zero to mean \enquote{never mind, do
+it the built-in way}.
+
+Two departures from Emacs are worth naming.  First, a range spanning
+several chunks is not clamped to the first one and quietly truncated;
+it is \emph{split}, and each piece formatted within its own chunk, so
+[[gqG]] does the whole rest of the file without ever joining a
+paragraph to a chunk header.  The pieces are formatted last-first, so
+that reflowing one does not shift the line numbers of those still to
+come.  Second, where Emacs merely stops the filler from misreading a
+quote, we stop it from \emph{breaking} one: a [[[[...]]]] quote is a
+single conceptual token, and a user who wrote one wants it whole.  The
+stronger guarantee subsumes the weaker one and is easier to state.
+
+<<[[noweb#format]]>>=
+" 'formatexpr': fill v:lnum..v:lnum+v:count-1, chunk by chunk.
+function! noweb#format() abort
+  if v:char !=# ''
+    " Auto-wrapping as you type, one character at a time; the built-in
+    " formatter already stops at the chunk's blank lines.
+    return 1
+  endif
+  let l:last = v:lnum + v:count - 1
+  <<split the range into chunk pieces>>
+  <<spare the code when the range is a sweep>>
+  for l:piece in l:pieces
+    call s:format_piece(l:piece)
+  endfor
+  return 0
+endfunction
+@
+
+A range covering more than one chunk is a \emph{sweep}---[[gqG]],
+[[gqac]] over a pair, [[gggqG]] on the whole file---and what the user
+means by it is \enquote{tidy the prose}.  Reflowing code as if it were
+prose would join a function body into one line, which is what plain
+[[gq]] in a [[.nw]] buffer used to do and nobody ever wanted.  A range
+that lies inside a single chunk, on the other hand, is deliberate:
+[[gqip]] over a run of comments inside a code chunk is the one case
+where filling code is exactly right, and with [['comments']] set to
+the chunk language's own (\cref{sec:chunkopts}) it rewraps them with
+their leaders intact.  So: one piece, format it whatever it is; more
+than one, format only the prose.
+
+<<spare the code when the range is a sweep>>=
+if len(l:pieces) > 1
+  call filter(l:pieces, {_, p -> p.kind ==# 'doc'})
+endif
+@
+
+Each step of the walk asks for the chunk at the current line, takes the
+part of it that lies inside the requested range, and resumes past the
+chunk's end---past [[end]] rather than [[last]], so a code chunk's
+[[@ %def]] declarations are stepped over rather than filled as prose.
+
+<<split the range into chunk pieces>>=
+let l:pieces = []
+let l:n = v:lnum
+while l:n <= l:last
+  let l:c = s:chunk_bounds(l:n)
+  " Never below the chunk's body: a range that starts on a header line
+  " must not invite the formatter to join the header to the code.
+  let l:from = max([l:n, l:c.body])
+  let l:to = min([l:c.last, l:last])
+  if l:to >= l:from
+    call add(l:pieces, {'kind': l:c.kind, 'from': l:from, 'to': l:to})
+  endif
+  let l:n = max([l:c.end, l:n]) + 1
+endwhile
+" Later pieces first: filling one piece moves everything below it.
+call reverse(l:pieces)
+@
+
+Code is handed to the built-in formatter unchanged.  That is not a
+concession: by the time it runs, [['comments']] and
+[['formatoptions']] are the chunk language's own
+(\cref{sec:chunkopts}), so [[gq]] on a run of Python comments rewraps
+them with [[#]] leaders, which is exactly what Emacs's mode switch
+buys and all anyone wants here.
+
+<<[[s:format_piece]]>>=
+" Fill one piece of one chunk.  Each step can change how many lines
+" the piece occupies, so its end is carried along rather than reread.
+function! s:format_piece(p) abort
+  if a:p.kind ==# 'code'
+    call s:internal_format(a:p.from, a:p.to)
+    return
+  endif
+  let l:to = a:p.to
+  <<rejoin code quotes split across lines>>
+  <<hide the spaces inside the code quotes>>
+  let l:before = line('$')
+  call s:internal_format(a:p.from, l:to)
+  let l:to += line('$') - l:before
+  <<put the spaces back>>
+endfunction
+@
+
+A quote that is \emph{already} broken across two lines defeats the
+protection below before it starts: neither line holds a whole
+[[[[...]]]], so neither is recognized, and the fill is free to join
+the two and break them somewhere else.  Real documents are full of
+these---this one has four---because a quote is only ever split by a
+previous fill.  Joining them first makes them visible, and costs
+nothing that was not going to happen: filling a paragraph joins its
+lines anyway.  Only within a paragraph, though; a blank line ends the
+search, or an unterminated quote would swallow the rest of the chunk.
+
+<<rejoin code quotes split across lines>>=
+let l:n = a:p.from
+while l:n < l:to
+  if s:quote_open(getline(l:n)) && getline(l:n + 1) !~# '^\s*$'
+    call setline(l:n, getline(l:n) . ' '
+          \ . substitute(getline(l:n + 1), '^\s*', '', ''))
+    execute 'silent ' . (l:n + 1) . 'delete _'
+    let l:to -= 1
+  else
+    let l:n += 1
+  endif
+endwhile
+@
+
+Deciding whether a line leaves a quote open is a counting question,
+and the naive test---\enquote{is there a [[[[]] after the last
+[[]]]]?}---gets this document's own convention wrong, since a literal
+[[[[]] is written [[[[[[]]]] and a literal [[]]]] as [[]]]]]].
+Striking out the complete quotes first and asking what is left over
+handles both.
+
+<<[[s:quote_open]]>>=
+" Does the line leave a [[...]] quote unclosed?  Complete quotes are
+" struck out first, so the doubled brackets that write a literal
+" bracket do not read as an opening one.
+function! s:quote_open(line) abort
+  return substitute(a:line, s:QUOTE, '', 'g') =~# '\[\['
+endfunction
+@
+
+The trick for keeping a quote whole is to take away the only thing the
+formatter can break at.  Replacing the blanks \emph{inside}
+[[[[...]]]] with a character that occurs nowhere in the text makes
+each quote a single unbreakable word for the duration of the fill;
+afterwards the blanks go back.
+
+\enquote{Nowhere in the text} has to mean nowhere in the \emph{piece},
+not nowhere in the buffer, and the difference is not academic.  The
+stand-ins are private-use codepoints, chosen because documents do not
+contain them---except that this one does, all three of them, on the
+line below that names them: a literate program prints its own source.
+Searching the whole buffer therefore found every candidate in use and
+silently turned the protection off, for exactly the document most
+likely to be tested with.  Only the lines being substituted into and
+read back out of can be affected, so only those need checking---which
+also spares a buffer-wide scan per piece.
+
+<<the code-quote pattern and its stand-in>>=
+" A [[...]] quote, and the private-use characters we borrow to stand
+" in for the blanks inside one while the formatter runs.
+let s:QUOTE = '\[\[.\{-}\]\]'
+let s:FILLERS = [nr2char(0xe000), nr2char(0xe001), nr2char(0xe002)]
+@
+
+<<[[s:free_filler]]>>=
+" A stand-in appearing in none of these lines, or '' if every
+" candidate somehow does -- then the fill still happens, just without
+" the protection.
+function! s:free_filler(lines) abort
+  for l:c in s:FILLERS
+    if match(a:lines, l:c) < 0
+      return l:c
+    endif
+  endfor
+  return ''
+endfunction
+@
+
+<<hide the spaces inside the code quotes>>=
+let l:lines = getline(a:p.from, l:to)
+let l:filler = s:free_filler(l:lines)
+if l:filler !=# ''
+  let l:hidden = []
+  for l:line in l:lines
+    call add(l:hidden, s:hide_quotes(l:line, l:filler))
+  endfor
+  call setline(a:p.from, l:hidden)
+endif
+@
+
+Walking the line by hand rather than reaching for a [[\=]] replacement
+expression is not squeamishness: the substitution has to look inside
+its own match, and a nested [[substitute()]] under [[\=]] inside a
+lambda has neither the submatch nor the enclosing local in the scope
+one would expect.
+
+<<[[s:hide_quotes]]>>=
+" Replace the blanks inside every [[...]] quote on the line with the
+" stand-in, leaving each quote a single unbreakable word.
+function! s:hide_quotes(line, filler) abort
+  let l:out = ''
+  let l:rest = a:line
+  while 1
+    let l:mp = matchstrpos(l:rest, s:QUOTE)
+    if l:mp[1] < 0
+      return l:out . l:rest
+    endif
+    let l:out .= strpart(l:rest, 0, l:mp[1])
+          \ . substitute(l:mp[0], '[ \t]', a:filler, 'g')
+    let l:rest = strpart(l:rest, l:mp[2])
+  endwhile
+endfunction
+@
+
+<<put the spaces back>>=
+if l:filler !=# ''
+  let l:shown = []
+  for l:line in getline(a:p.from, l:to)
+    call add(l:shown, substitute(l:line, l:filler, ' ', 'g'))
+  endfor
+  call setline(a:p.from, l:shown)
+endif
+@
+
+Running the built-in formatter from inside [['formatexpr']] means
+taking [['formatexpr']] out of the way first---it is us, and we would
+recurse.  A linewise visual selection is the shortest way to hand
+[[gq]] an exact range, and folding has to come off around it: a
+linewise operator takes a closed fold as a whole
+(\texttt{:help fold-behavior}), so with \cref{sec:folding} turned on
+the fill of one chunk would reach into its neighbours.  These ranges
+are exact by construction and must be honoured exactly.
+
+<<[[s:internal_format]]>>=
+" Vim's own formatter over first..last, with 'formatexpr' (this file)
+" unset so that gq does not call us back.
+function! s:internal_format(first, last) abort
+  let l:save = &l:formatexpr
+  try
+    let &l:formatexpr = ''
+    call s:normal_over(a:first, a:last, 'gq')
+  finally
+    let &l:formatexpr = l:save
+  endtry
+endfunction
+
+" Apply a linewise operator to exactly first..last, with folding off:
+" a closed fold would extend the operator over the whole fold.
+function! s:normal_over(first, last, op) abort
+  let l:foldenable = &l:foldenable
+  try
+    setlocal nofoldenable
+    call cursor(a:first, 1)
+    execute 'normal! V'
+          \ . (a:last > a:first ? (a:last - a:first) . 'j' : '') . a:op
+  finally
+    let &l:foldenable = l:foldenable
+  endtry
+endfunction
+@
+
+\subsection{Formatting a whole chunk}
+\label{sec:fillchunk}
+
+Emacs's [[M-n q]] is one command that means two things: fill the
+prose, or re-indent the code, whichever this chunk is.  [[:NowebFillChunk]]
+is the same command.  It exists alongside [[gqic]] and [[=ic]]---which
+now work---because saying \enquote{tidy this chunk} without first
+deciding which kind it is turns out to be what one actually wants
+while writing.
+
+<<[[noweb#fill_chunk]]>>=
+" :NowebFillChunk -- Emacs's M-n q: fill the prose or re-indent the
+" code, according to the chunk the cursor is in.
+function! noweb#fill_chunk() abort
+  let l:c = s:chunk_bounds(line('.'))
+  if l:c.last < l:c.body
+    return
+  endif
+  let l:view = winsaveview()
+  try
+    if l:c.kind ==# 'code'
+      <<re-indent the code chunk>>
+    else
+      call s:format_piece({'kind': 'doc', 'from': l:c.body, 'to': l:c.last})
+    endif
+  finally
+    call winrestview(l:view)
+  endtry
+endfunction
+@
+
+Re-indenting needs an indenter, and this buffer has none: its filetype
+is [[noweb]], and \cref{sec:chunkopts} deliberately leaves
+[['indentexpr']] out of the options a chunk gets, because an indent
+script is not a value one can copy---it is code, holding buffer-local
+state under guards this buffer never ran.  A bare [[=]] here therefore
+falls through to Vim's built-in C indenting, which on a Python chunk
+is worse than doing nothing.
+
+There are two better answers, and which is available depends on the
+editor.  The shadow (\cref{sec:shadowindent}) is the good one: the
+chunk's code, in a real buffer of the right filetype, spliced where it
+actually goes.  Without a shadow the same idea works one step less
+well---copy the chunk into a throwaway buffer of its filetype, let
+that filetype's indent script run there, and copy the indentation
+back.  What it loses is context: the chunk is indented as though it
+stood alone, because standing alone is all a chunk does until
+something tangles it.  Only where the language is unknown does plain
+[[=]] remain, and there Vim's default is all anyone can mean.
+
+<<re-indent the code chunk>>=
+let l:ft = get(noweb#languages(), l:c.name, '')
+if s:shadow_indent(l:c.body, l:c.last)
+  " The shadow's indenter had the whole tangle to work with.
+elseif l:ft !=# ''
+  call s:scratch_indent(l:ft, l:c.body, l:c.last)
+else
+  call s:normal_over(l:c.body, l:c.last, '=')
+endif
+@
+
+The throwaway buffer takes the [[.nw]] buffer's indentation
+conventions with it, or a literate program written with spaces would
+come back with tabs in it.  It declines when the filetype turns out to
+have no indenter at all, and the caller does nothing rather than
+inventing one.
+
+<<[[s:scratch_indent]]>>=
+" Re-indent first..last with the indent script of filetype ft, run in
+" a throwaway buffer of that filetype -- the fallback for when no
+" shadow covers the chunk.  Returns 0 if ft has no indenter.
+function! s:scratch_indent(ft, first, last) abort
+  let l:lines = getline(a:first, a:last)
+  let l:done = []
+  let l:conventions = [&l:expandtab, &l:shiftwidth, &l:tabstop, &l:softtabstop]
+  let l:eventignore = &eventignore
+  set eventignore=all
+  try
+    silent keepalt new
+    setlocal buftype=nofile noswapfile
+    set eventignore=Syntax
+    execute 'setfiletype' a:ft
+    if &l:indentexpr ==# '' && &l:equalprg ==# '' && !&l:cindent && !&l:lisp
+      return 0
+    endif
+    let [&l:expandtab, &l:shiftwidth, &l:tabstop, &l:softtabstop]
+          \ = l:conventions
+    call setline(1, l:lines)
+    silent normal! gg=G
+    let l:done = getline(1, '$')
+  catch
+    let l:done = []
+  finally
+    set eventignore=all
+    silent! bwipeout!
+    let &eventignore = l:eventignore
+  endtry
+  if len(l:done) != len(l:lines)
+    return 0
+  endif
+  call setline(a:first, l:done)
+  return 1
+endfunction
+@
+
+\subsection{Editing options that follow the cursor}
+\label{sec:chunkopts}
+
+Here is the gap this section exists for.  In a Python chunk,
+[['commentstring']] is still [[%\ %s]], so a commenting plugin
+comments the line out the \TeX{} way; [['comments']] is \TeX{}'s, so
+[[gq]] over a run of [[#]] comments does not know they have a leader;
+[['iskeyword']] is \TeX{}'s, so [[*]] on [[foo_bar]] searches for
+[[foo]].  The syntax says Python and the language server says Python;
+only the editor's own behaviour still says \TeX{}.
+
+The obvious repair is the Emacs one---switch the filetype as the
+cursor moves---and it is not available.  Emacs can switch major modes
+under point because it marks its own state [[permanent-local]], so the
+switch does not take the minor mode with it; Vim has no such thing.  A
+[[:setfiletype python]] in this buffer would run [[b:undo_ftplugin]]
+and take with it the omnifunc, the tagfunc, the tag stack behaviour,
+every map in \cref{sec:editmaps}, the shadow autocommands and the
+syntax---the whole plugin.  What is wanted is not the filetype but the
+handful of \emph{options} a filetype plugin sets, so we take those and
+leave the filetype alone.
+
+<<the per-chunk options>>=
+" The buffer-local options a chunk's language should own.  Not
+" 'textwidth': ftplugins mostly leave it alone and users mostly do
+" not, so it belongs to the user, not to the chunk.
+let s:CHUNK_OPTIONS = ['commentstring', 'comments', 'iskeyword',
+      \ 'matchpairs', 'suffixesadd', 'formatoptions']
+let s:optcache = {}
+@
+
+Where do a filetype's values come from?  From the filetype, by asking
+it---the same answer \cref{sec:askeditor} gave for
+\enquote{what language is this file?}, and the same throwaway buffer
+to ask it in.  The difference is which events are wanted:
+[[s:detect_in_scratch]] suppresses [[FileType]], because it only wants
+detection, whereas here [[FileType]] is the entire point and it is
+[[Syntax]] that is suppressed---loading a syntax file to read
+[['commentstring']] would be a great deal of work for nothing.  Once
+per language per session, cached.
+
+<<[[s:options_for]]>>=
+" The chunk options a filetype's ftplugin sets, read out of a
+" throwaway buffer of that filetype.  An empty ft gives the values a
+" buffer has when no filetype has spoken for it, which is how
+" s:doc_options tells a deliberate value from a factory one.  Cached:
+" this runs once per language per session.
+function! s:options_for(ft) abort
+  if has_key(s:optcache, a:ft)
+    return s:optcache[a:ft]
+  endif
+  let l:opts = {}
+  let l:eventignore = &eventignore
+  set eventignore=all
+  try
+    silent keepalt new
+    setlocal buftype=nofile noswapfile
+    set eventignore=Syntax
+    if a:ft !=# ''
+      execute 'setfiletype' a:ft
+    endif
+    for l:o in s:CHUNK_OPTIONS
+      let l:opts[l:o] = getbufvar('%', '&' . l:o)
+    endfor
+  catch
+    let l:opts = {}
+  finally
+    set eventignore=all
+    silent! bwipeout!
+    let &eventignore = l:eventignore
+  endtry
+  let s:optcache[a:ft] = l:opts
+  return l:opts
+endfunction
+@
+
+The prose needs values too, and its filetype---[[noweb]]---is this
+buffer's own, so they are mostly just what the options already are
+when the plugin first looks.  Capturing them lazily rather than at
+ftplugin time is deliberate: VimTeX initializes after us
+(\cref{sec:vimtexprose}) and may set some of them, and by waiting until the
+cursor first moves we record what the user really ended up with.
+
+Mostly, but not entirely.  Filetype [[noweb]] has no ftplugin of its
+own beyond this plugin's, so on a bare Vim nothing has ever told the
+buffer that its prose is \TeX{}---[['commentstring']] is still Vim's
+factory [[/*\ %s\ */]], which is a C comment in a \TeX{} document.
+Where nothing has spoken for an option, the [[tex]] filetype should.
+
+\enquote{Nothing has spoken for it} needs a definition, and
+\enquote{it is empty} is not one---Vim ships non-empty defaults for
+some of these and Neovim ships empty ones for the same, which is
+exactly the sort of difference that makes a plugin work on one editor
+and not the other.  The test that holds on both is to compare against
+a buffer with \emph{no} filetype at all: an option still equal to what
+a bare buffer would have is one nobody has claimed, and \TeX{}'s value
+is better than the factory's.  Anything else---a value VimTeX chose, a
+value from the user's own [[ftplugin/noweb.vim]]---was set
+deliberately and stands.
+
+<<[[s:doc_options]]>>=
+" The prose's own options.  An option still holding the value a
+" filetype-less buffer would have is one nothing has claimed, and
+" takes filetype tex's instead -- the prose is TeX, and no ftplugin
+" says so on a bare Vim.  Everything else was set deliberately (by
+" VimTeX, or by the user) and stands.  Captured on first use, after
+" every other ftplugin has had its say.
+function! s:doc_options() abort
+  if !exists('b:noweb_doc_options')
+    let l:bare = s:options_for('')
+    let l:tex = s:options_for('tex')
+    let b:noweb_doc_options = {}
+    for l:o in s:CHUNK_OPTIONS
+      let l:v = getbufvar('%', '&' . l:o)
+      let b:noweb_doc_options[l:o] =
+            \ l:v ==# get(l:bare, l:o, l:v) ? get(l:tex, l:o, l:v) : l:v
+    endfor
+  endif
+  return b:noweb_doc_options
+endfunction
+@
+
+The hook itself runs on every cursor movement, so it is written to do
+nothing at all in the common case.  [[s:chunk_bounds]]
+(\cref{sec:bounds}) answers from its memo while the cursor stays in
+one chunk, and the filetype it resolves to is compared against the one
+already applied before any option is written.  Moving about inside a
+chunk therefore costs a dictionary lookup and a string comparison.
+
+<<[[noweb#chunk_options]]>>=
+" Give the buffer the editing options of the chunk under the cursor.
+" Called on every cursor movement, so the unchanged case must be
+" nearly free.
+function! noweb#chunk_options() abort
+  if !get(g:, 'noweb_chunk_options', 1)
+    return
+  endif
+  let l:c = s:chunk_bounds(line('.'))
+  let l:ft = l:c.kind ==# 'code'
+        \ ? get(noweb#languages(), l:c.name, '') : ''
+  if get(b:, 'noweb_applied', v:null) is# l:ft
+    return
+  endif
+  call s:doc_options()
+  let l:opts = l:ft ==# '' ? {} : s:options_for(l:ft)
+  " An unknown language is no reason to leave TeX's idea of a comment
+  " in place, but it is no reason to invent one either: fall back to
+  " the prose's options, which is where we came from.
+  for [l:o, l:v] in items(empty(l:opts) ? b:noweb_doc_options : l:opts)
+    call setbufvar('%', '&' . l:o, l:v)
+  endfor
+  let b:noweb_applied = l:ft
+endfunction
+@
+
+Undoing this on a filetype change is the same loop against the
+captured prose values, and it has to run: leaving a buffer that is no
+longer noweb with some chunk's [['iskeyword']] would be a puzzling
+thing to debug.
+
+<<[[noweb#chunk_options_reset]]>>=
+" Put the prose's options back; b:undo_ftplugin calls this.
+function! noweb#chunk_options_reset() abort
+  for [l:o, l:v] in items(get(b:, 'noweb_doc_options', {}))
+    call setbufvar('%', '&' . l:o, l:v)
+  endfor
+  unlet! b:noweb_doc_options b:noweb_applied
+endfunction
+@
+
+\subsection{Folding a chunk out of the way}
+\label{sec:folding}
+
+Emacs's answer to \enquote{let me see this chunk and nothing else} is
+narrowing: [[M-n n]] restricts the buffer to the current chunk, [[M-n
+N]] to the pair, and [[M-n t]] makes every navigation command re-narrow
+after it moves.  Vim has no narrowing, and the honest translation is
+not to build one---it is folding, which the editor already has, which
+composes with everything, and which is reversible with a keystroke
+rather than a mode.  [[zM]] then [[zv]] is [[M-n t]]; [[zj]] and
+[[zk]] become chunk motions for free.
+
+A [['foldexpr']] is called once per line, on every line, whenever the
+folds are recomputed, so it must not think.  This one does not: it
+tests the line against [[s:HEAD]] and says either \enquote{a fold
+starts here} or \enquote{still inside one}.  Notably it does
+\emph{not} consult [[s:chunk_bounds]]---and it gets the [[@ %def]]
+case right anyway, because those lines are not in [[s:HEAD]] and so
+stay inside the fold of the chunk they belong to.
+
+<<[[noweb#foldexpr]]>>=
+" 'foldexpr': one fold per chunk.  Runs per line and looks at nothing
+" but the line; "@ %def" is not a head, so it folds with its chunk.
+function! noweb#foldexpr(lnum) abort
+  return getline(a:lnum) =~# s:HEAD ? '>1' : '1'
+endfunction
+@
+
+The fold's one line of text is a chance to say something the fold has
+hidden.  For a code chunk that is its name and its language---which
+the narrowing it replaces could never have told anyone, since Emacs
+does not know the language.
+
+<<[[noweb#foldtext]]>>=
+" 'foldtext': the chunk's name and inferred language, or the prose's
+" first real line.
+function! noweb#foldtext() abort
+  let l:head = getline(v:foldstart)
+  let l:count = v:foldend - v:foldstart + 1
+  if l:head =~# s:DEFLINE
+    let l:name = matchstr(l:head, s:DEF)
+    let l:lang = get(noweb#languages(), l:name, '')
+    let l:what = '@<<' . l:name . '@>>=' . (l:lang ==# '' ? '' : '  ' . l:lang)
+  else
+    <<describe a folded documentation chunk>>
+  endif
+  return printf('%s  [%d lines]', l:what, l:count)
+endfunction
+@
+
+A documentation chunk has no name, so it is described by its first
+line with anything to say---skipping the bare [[@]] marker and any
+blank lines under it.
+
+<<describe a folded documentation chunk>>=
+let l:what = ''
+for l:n in range(v:foldstart, min([v:foldend, v:foldstart + 4]))
+  let l:text = substitute(getline(l:n), '^@\s*', '', '')
+  if l:text !~# '^\s*$'
+    let l:what = l:text
+    break
+  endif
+endfor
+if l:what ==# ''
+  let l:what = '@'
+endif
+@
+
+\subsection{Reaching a chunk by name}
+\label{sec:goto}
+
+[[<C-]>]] (\cref{sec:tagfunc}) answers \enquote{where is
+\emph{this}?}, with the cursor already on the name.  Emacs's
+[[noweb-goto-chunk]] answers a different question---\enquote{where is
+the one called \dots?}---by prompting with completion over every chunk
+in the buffer, and this plugin has had no equivalent.  It cannot
+simply be [[:tag]]: Vim's [[:tag]] completes from a tags \emph{file},
+and never consults [['tagfunc']].
+
+<<[[noweb#goto]]>>=
+" :NowebGoto -- jump to a chunk's first definition by name, defaulting
+" to the one under the cursor.  Emacs lands on the last chunk of the
+" name, an accident of how it builds its alist; the first definition
+" is what anyone means.
+function! noweb#goto(name) abort
+  let l:name = a:name ==# '' ? s:chunk_at_cursor() : a:name
+  if l:name ==# ''
+    call s:no_chunk()
+    return
+  endif
+  let l:defs = get(s:chunk_occurrences(), l:name, {'defs': []}).defs
+  if empty(l:defs)
+    echohl WarningMsg
+    echomsg 'noweb: no definition of @<<' . l:name . '@>>'
+    echohl None
+    return
+  endif
+  <<push the tag stack, then jump>>
+endfunction
+@
+
+Arriving by [[<C-]>]] and arriving by [[:NowebGoto]] should leave
+equally well, so the jump is pushed onto the tag stack and
+\texttt{CTRL-T} comes back from either.  [[settagstack]] is younger
+than the rest of what the plugin needs, so the [['']] mark carries the
+return trip on its own where it is missing.
+
+<<push the tag stack, then jump>>=
+normal! m'
+if exists('*settagstack')
+  call settagstack(win_getid(), {'items': [{'tagname': l:name,
+        \ 'from': [bufnr('%'), line('.'), col('.'), 0]}]}, 'a')
+endif
+call cursor(l:defs[0][0], 1)
+@
+
+Completing the name is where noweb's willingness to let chunk names
+contain blanks stops being free.  Vim hands a completion function only
+the text since the last blank, and substitutes the chosen candidate
+for exactly that much, so returning whole names would repeat
+everything before the final word.  Matching on the whole argument and
+returning only its tail puts the two ends back in agreement.
+
+The two callers differ only in where the name starts on the line: a
+command has its own name in front, and an [[input()]] prompt does not.
+
+<<[[noweb#chunk_names]]>>=
+" Chunk names starting with 'lead', each trimmed to the part Vim will
+" substitute for a:arglead.  Names may contain blanks while a:arglead
+" is only the text since the last one, so the two must be given
+" separately or completing "greet body" would insert "greet greet
+" body".
+function! s:name_completions(lead, arglead) abort
+  let l:drop = len(a:lead) - len(a:arglead)
+  let l:names = sort(filter(keys(s:chunk_occurrences()),
+        \ {_, n -> stridx(n, a:lead) == 0}))
+  return map(l:names, {_, n -> strpart(n, l:drop)})
+endfunction
+
+" Completion for :NowebGoto: the command's own name comes first.
+function! noweb#chunk_names(arglead, cmdline, cursorpos) abort
+  return s:name_completions(
+        \ matchstr(a:cmdline, '^\s*\S\+\s\+\zs.*'), a:arglead)
+endfunction
+
+" Completion for input(): the whole line is the name.
+function! noweb#chunk_name_input(arglead, cmdline, cursorpos) abort
+  return s:name_completions(a:cmdline, a:arglead)
+endfunction
+@
+
+[[:NowebChunks]] is the survey that goes with the jump: every
+definition in the file, in file order, in the location list---a table
+of contents for the program, next to VimTeX's table of contents for
+the prose.  It is the location list rather than the quickfix list for
+the same reason [[:NowebRefs]] is (\cref{sec:refs}): a survey belongs
+to the window that asked for it.
+
+<<[[noweb#chunks]]>>=
+" :NowebChunks -- every chunk definition in file order, in the
+" location list.
+function! noweb#chunks() abort
+  let l:occ = s:chunk_occurrences()
+  let l:items = []
+  for l:name in keys(l:occ)
+    for l:def in l:occ[l:name].defs
+      call add(l:items, {'bufnr': bufnr('%'), 'lnum': l:def[0],
+            \ 'col': l:def[1], 'text': '@<<' . l:name . '@>>='})
+    endfor
+  endfor
+  if empty(l:items)
+    echohl WarningMsg
+    echomsg 'noweb: no chunks in this buffer'
+    echohl None
+    return
+  endif
+  call sort(l:items, {a, b -> a.lnum - b.lnum})
+  call setloclist(0, [], ' ', {'title': 'noweb chunks', 'items': l:items})
+  lopen
+endfunction
+@
+
+\subsection{Starting a chunk}
+\label{sec:newchunk}
+
+Emacs offers three ways to begin a chunk: [[M-n i]] prompts for a name
+and drops in a template, and the electric [[@]] and [[<]] keys turn
+those characters at the start of a line into the beginnings of a
+documentation or code chunk.  The electric keys are not ported.
+Rebinding [[<]] in insert mode to guess at intent is a hostile thing
+to do in Vim, and the useful half of what they buy---getting the name
+right---is already covered better by completing it after
+[[@<<]] (\cref{sec:complete}).
+
+The template is worth having, and worth completing the name of too:
+noweb's most common editing act is adding an \emph{append} to a chunk
+that already exists, which is the same template with a name from the
+list.  What it inserts differs from Emacs's in two ways.  It leaves
+out the [[@ %def ]] line, which noweb only needs when a chunk should
+appear in the identifier index and which an empty one clutters the
+source with; and it closes the chunk with [[@]], so what lands in the
+buffer is complete and valid rather than something the writer has to
+remember to finish.  The leading [[@]] appears only when there is code
+to get out of first.
+
+<<[[noweb#new_chunk]]>>=
+" :NowebNewChunk -- open a chunk below the cursor, with the cursor on
+" its first body line.  With no name, prompt for one with completion,
+" so appending to an existing chunk is the same gesture.
+function! noweb#new_chunk(name) abort
+  let l:name = a:name
+  if l:name ==# ''
+    let l:name = input('Chunk name: ', '',
+          \ 'customlist,noweb#chunk_name_input')
+    redraw
+  endif
+  if l:name ==# ''
+    return
+  endif
+  let l:at = line('.')
+  let l:lines = s:chunk_bounds(l:at).kind ==# 'code' ? ['@', ''] : []
+  call append(l:at, l:lines + ['@<<' . l:name . '@>>=', '', '@'])
+  call cursor(l:at + len(l:lines) + 2, 1)
+endfunction
+@
+
+\subsection{Binding the objects and the motions}
+\label{sec:editmaps}
+
+Ten new keys is a lot to take from a user's buffer, so they follow the
+discipline \cref{sec:ftplugin} set for \texttt{]c} and \texttt{[c}:
+every one goes through a [[<Plug>]] name, [[g:noweb_no_maps]]
+suppresses the lot, and [[hasmapto]] yields to anything the user has
+already bound.  Only the [[<Plug>]] definitions are unconditional, and
+they are global---rebinding them is how a user moves ours out of the
+way.
+
+The four objects each want two modes and the six motions want three,
+so this is one place where writing the maps out longhand would be
+forty lines of near-identical text; a loop over the table says the
+same thing and keeps the correspondence visible.
+
+<<the chunk objects and motions>>=
+" ic / ac / iC / aC, in both the modes a text object serves.
+for [s:key, s:plug, s:args] in [
+      \ ['ic', 'inner-chunk', '0, 0'],
+      \ ['ac', 'a-chunk', '0, 1'],
+      \ ['iC', 'inner-pair', '1, 0'],
+      \ ['aC', 'a-pair', '1, 1']]
+  for s:mode in ['x', 'o']
+    execute s:mode . 'noremap <silent> <Plug>(noweb-' . s:plug . ') '
+          \ . ':<C-u>call noweb#textobj(' . s:args . ')<CR>'
+    if !get(g:, 'noweb_no_maps', 0)
+          \ && !hasmapto('<Plug>(noweb-' . s:plug . ')', s:mode)
+      execute s:mode . 'map <buffer> ' . s:key
+            \ . ' <Plug>(noweb-' . s:plug . ')'
+    endif
+  endfor
+  let b:undo_ftplugin .= ' | silent! xunmap <buffer> ' . s:key
+        \ . ' | silent! ounmap <buffer> ' . s:key
+endfor
+
+" ]] [[ ]m [m ][ [] -- structural movement, in the three modes a
+" motion serves.
+for [s:key, s:plug, s:args] in [
+      \ [']]', 'next-chunk', "1, '', v:count1"],
+      \ ['[[', 'prev-chunk', "-1, '', v:count1"],
+      \ [']m', 'next-code-chunk', "1, 'code', v:count1"],
+      \ ['[m', 'prev-code-chunk', "-1, 'code', v:count1"],
+      \ ['][', 'next-doc-chunk', "1, 'doc', v:count1"],
+      \ ['[]', 'prev-doc-chunk', "-1, 'doc', v:count1"]]
+  for s:mode in ['n', 'x', 'o']
+    execute s:mode . 'noremap <silent> <Plug>(noweb-' . s:plug . ') '
+          \ . ':<C-u>call noweb#next_chunk(' . s:args . ')<CR>'
+    if !get(g:, 'noweb_no_maps', 0)
+          \ && !hasmapto('<Plug>(noweb-' . s:plug . ')', s:mode)
+      execute s:mode . 'map <buffer> ' . s:key
+            \ . ' <Plug>(noweb-' . s:plug . ')'
+    endif
+  endfor
+  let b:undo_ftplugin .= ' | silent! nunmap <buffer> ' . s:key
+        \ . ' | silent! xunmap <buffer> ' . s:key
+        \ . ' | silent! ounmap <buffer> ' . s:key
+endfor
+
+unlet! s:key s:plug s:args s:mode
+@
+
+The formatting hook takes no keys at all: [[gq]] and [[gw]] already
+route through [['formatexpr']], so setting it is the whole
+installation.
+
+<<the formatting hook and the [[:NowebFillChunk]] command>>=
+setlocal formatexpr=noweb#format()
+command! -buffer NowebFillChunk call noweb#fill_chunk()
+let b:undo_ftplugin .= ' | setlocal formatexpr<'
+      \ . ' | silent! delcommand -buffer NowebFillChunk'
+@
+
+The options hook needs an autocommand, and one that fires often; the
+work of making that cheap was done in \cref{sec:bounds,sec:chunkopts}.
+[[BufEnter]] joins the cursor events so that returning to the buffer
+in a different window lands with the right options rather than the
+ones the other window left behind.
+
+<<follow the cursor with the chunk's options>>=
+if get(g:, 'noweb_chunk_options', 1)
+  augroup nowebChunkOptions
+    autocmd! * <buffer>
+    autocmd CursorMoved,CursorMovedI,BufEnter <buffer>
+          \ call noweb#chunk_options()
+  augroup END
+  let b:undo_ftplugin .= ' | silent! autocmd! nowebChunkOptions * <buffer>'
+        \ . ' | call noweb#chunk_options_reset()'
+endif
+@
+
+Folding is the one thing here that is off unless asked for.  A
+[['foldexpr']] runs on every line of the buffer, and---more to the
+point---how a buffer folds is a matter of taste that users hold
+firmly.  [[g:noweb_fold]] turns it on.
+
+<<fold by chunk when asked>>=
+if get(g:, 'noweb_fold', 0)
+  setlocal foldmethod=expr
+  setlocal foldexpr=noweb#foldexpr(v:lnum)
+  setlocal foldtext=noweb#foldtext()
+  let b:undo_ftplugin .= ' | setlocal foldmethod< foldexpr< foldtext<'
+endif
+@
+
+The three chunk commands need no keys either.  [[:NowebGoto]] takes an
+optional name and completes it; [[:NowebNewChunk]] takes an optional
+name and prompts when it is missing, so [[:NowebNewChunk]] on its own
+is the interactive form and [[:NowebNewChunk parser]] the direct one.
+
+<<the chunk commands>>=
+command! -buffer -nargs=? -complete=customlist,noweb#chunk_names
+      \ NowebGoto call noweb#goto(<q-args>)
+command! -buffer NowebChunks call noweb#chunks()
+command! -buffer -nargs=? NowebNewChunk call noweb#new_chunk(<q-args>)
+let b:undo_ftplugin .= ' | silent! delcommand -buffer NowebGoto'
+      \ . ' | silent! delcommand -buffer NowebChunks'
+      \ . ' | silent! delcommand -buffer NowebNewChunk'
+@
+
+\section{The help file}
+\label{sec:helpfile}
+
+Emacs has had one thing this plugin never did: a way to ask it what it
+can do.  [[M-n h]] describes the mode, and the docstring it prints
+(\texttt{noweb-mode.el} lines 157--207) is a grouped cheat sheet of
+every key.  Vim's equivalent is a help file, and until now the plugin
+shipped none---a user's only documentation was the README and this
+document, neither of which is in the editor when the question arises.
+
+[[doc/noweb.txt]] is the plugin's eighth tangled file, written here
+like everything else so that it cannot drift from the code it
+describes.  It is a reference, not a retelling: the reasoning lives in
+this document and the help file says what the keys and options are.
+Vim builds the tag index itself when the plugin manager runs
+[[:helptags]].
+
+<<[[doc/noweb.txt]]>>=
+*noweb.txt*     Literate programming with noweb            *noweb* *vim-noweb*
+
+Highlighting, navigation and editing for noweb literate programs
+(*.nw): TeX prose, noweb markup, and every code chunk in the language
+it is actually written in.
+
+1. Requirements ......................... |noweb-requirements|
+2. Highlighting ......................... |noweb-highlighting|
+3. Completion and navigation ............ |noweb-navigation|
+4. Editing in chunks .................... |noweb-editing|
+5. Language intelligence ................ |noweb-intelligence|
+6. Commands ............................. |noweb-commands|
+7. Options .............................. |noweb-options|
+8. Mappings ............................. |noweb-mappings|
+
+==============================================================================
+1. Requirements                                          *noweb-requirements*
+
+Highlighting, completion, navigation and everything in
+|noweb-editing| need nothing but Vim.
+
+|noweb-intelligence| needs Neovim and the "linemark" and "nolinemap"
+tools from the dbosk noweb fork (contrib/dbosk).  "notangle" and
+"nolinemap" must be on $PATH, because the plugin runs them itself;
+"linemark" need only be installed where noweb keeps its filters (its
+LIB directory, which "make install" in contrib/dbosk writes to),
+since it is only ever reached as a "notangle -filter" and notangle
+puts LIB on $PATH for its filters.
+
+A language server per language is optional; without one the tangled
+preview, |:NowebMake| and a pattern-based `gd` still work.
+
+==============================================================================
+2. Highlighting                                          *noweb-highlighting*
+
+The whole buffer is TeX prose by default.  Chunk headers, chunk
+references and [[...]] quotes are marked as noweb markup, and each
+code chunk's body is highlighted in the chunk's own language.
+
+The language is inferred the way noweb's "autolang" weave filter does
+it: from filename-like chunk names, from #! lines, and by propagation
+along @<<use@>> edges, so a descriptively named chunk used by a typed
+root inherits the root's language.  Name and shebang lookups ask the
+editor's own filetype database, so every language the editor can
+detect is covered.
+
+Highlighting refreshes on every write.  |:NowebSyncLang| refreshes it
+on demand.  |g:noweb_langrules| adds name-pattern rules.
+
+==============================================================================
+3. Completion and navigation                              *noweb-navigation*
+
+                                                        *noweb-completion*
+Chunk names complete after "@<<" through the buffer's 'omnifunc':
+|i_CTRL-X_CTRL-O| in plain Vim, and automatically in YouCompleteMe and
+any framework with an omnifunc bridge.  Completion reads the live
+buffer, so unsaved chunks are offered the moment they are typed.  It
+closes the "@>>" unless it is already there, and the menu marks
+referenced-but-undefined names -- a quick way to spot a typo.  At a
+definition position the not-yet-defined names sort first.
+
+                                                        *noweb-tags*
+Chunk definitions resolve as tags through 'tagfunc'.  |CTRL-]| on a
+reference jumps to the definition, |:tnext| steps through the appends
+(a chunk defined several times has several tag matches), |CTRL-T|
+jumps back and |g]| lists them all.
+
+                                                        *noweb-occurrences*
+]c and [c step through every occurrence -- definition or use -- of the
+chunk under the cursor, wrapping.  |:NowebRefs| collects them all in
+the location list.  |:NowebGoto| jumps to a chunk by name, and
+|:NowebChunks| lists every definition in the file.
+
+==============================================================================
+4. Editing in chunks                                          *noweb-editing*
+
+                                                        *noweb-textobjects*
+Four linewise text objects, in operator-pending and visual mode:
+
+    ic      the chunk's content, without its header or its trailing
+            "@ %def" index declarations
+    ac      the whole chunk, markup included
+    iC      the content of the documentation/code pair
+    aC      the whole documentation/code pair
+
+A "pair" is noweb's unit of composition: a passage of prose and the
+code chunk it introduces.  From a code chunk, aC reaches back over the
+prose; from a documentation chunk, forward over the code.
+
+                                                        *noweb-motions*
+Six motions, all wrapping, all taking a count, all setting the |''|
+mark so that |CTRL-O| returns:
+
+    ]]      next chunk of either kind        [[      previous
+    ]m      next code chunk                  [m      previous
+    ][      next documentation chunk         []      previous
+
+                                                        *noweb-formatting*
+|gq| and |gw| understand chunks.  A range covering several chunks is
+split at the boundaries and each piece filled inside its own chunk, so
+"gqG" never joins a paragraph onto a chunk header; and because a sweep
+like that means "tidy the prose", code chunks in a multi-chunk range
+are left alone.  A range inside a single chunk is taken as deliberate
+and formatted whatever it is, so gqip over a run of comments in a code
+chunk rewraps them with their leaders.
+
+Blanks inside [[...]] quotes are protected for the duration of the
+fill, so a quote is never broken across two lines.
+
+|:NowebFillChunk| formats the whole chunk the cursor is in: filling it
+if it is prose, re-indenting it if it is code.
+
+                                                        *noweb-chunk-options*
+The buffer's editing options follow the cursor.  In a code chunk,
+'commentstring', 'comments', 'iskeyword', 'matchpairs', 'suffixesadd'
+and 'formatoptions' are the chunk language's own, so commenting
+plugins insert the right leader, |star| respects the language's word
+characters, and comment-aware |gq| works.  In prose they are TeX's.
+Set |g:noweb_chunk_options| to 0 to switch this off.
+
+                                                        *noweb-folding*
+With |g:noweb_fold| set, 'foldmethod' is "expr" and each chunk is one
+fold, labelled with its name and inferred language.  "zM" then "zv" is
+the closest thing Vim has to narrowing to a chunk.
+
+==============================================================================
+5. Language intelligence                                 *noweb-intelligence*
+
+Neovim only.  Every typed root chunk -- one named like a file, defined
+but never used -- gets an invisible tangled shadow buffer, kept in
+sync with the live .nw and served to a language server.  Results map
+back into the noweb source:
+
+- diagnostics appear on the offending chunk lines as you type;
+- completion inside a chunk comes from the language server, through
+  the same 'omnifunc';
+- `K` shows hover documentation and `gd` jumps to a definition,
+  landing in the right chunk even across chunks.  With no language
+  server, `gd` falls back to language-aware definition patterns over
+  the whole tangle;
+- |:NowebFillChunk| re-indents a code chunk with the language's own
+  indent script, run in the shadow;
+- |:NowebTangled| opens the tangled code read-only in a split, cursor
+  synced in both directions;
+- |:NowebMake| runs a command over the tangled file and fills the
+  quickfix list with positions in the .nw.
+
+Covered out of the box: the languages noweb ships "autodefs" filters
+for -- Python, shell, make, C, C++, Haskell, Java, Rust, TeX, Icon,
+Pascal, yacc -- plus Lua and Lean.  |g:noweb_languages| configures
+them; |g:noweb_shadow| switches the whole subsystem off.
+
+VimTeX, when installed, is initialized for the prose: motions, text
+objects, table of contents and \cite/\ref completion, routed through
+the same 'omnifunc'.  |g:noweb_vimtex| opts out.
+
+==============================================================================
+6. Commands                                                  *noweb-commands*
+
+                                                        *:NowebGoto*
+:NowebGoto [{name}]     Jump to the first definition of chunk {name},
+                        completing the name; with no argument, the
+                        chunk under the cursor.  Pushes the tag stack,
+                        so |CTRL-T| comes back.
+
+                                                        *:NowebChunks*
+:NowebChunks            Every chunk definition in file order, in the
+                        location list.
+
+                                                        *:NowebRefs*
+:NowebRefs              Every definition and use of the chunk under
+                        the cursor, in the location list.
+
+                                                        *:NowebNewChunk*
+:NowebNewChunk [{name}] Open a chunk below the cursor and put the
+                        cursor in its body.  With no argument, prompts
+                        for the name with completion -- so appending
+                        to an existing chunk is the same gesture.
+
+                                                        *:NowebFillChunk*
+:NowebFillChunk         Fill the current chunk if it is prose;
+                        re-indent it if it is code.
+
+                                                        *:NowebSyncLang*
+:NowebSyncLang          Re-infer chunk languages and rebuild the
+                        highlighting now, without writing.
+
+                                                        *:NowebTangled*
+:NowebTangled [{root}]  Open the tangled code for {root} read-only in
+                        a split, cursor-synced with the source; run it
+                        again to close.  Takes |:command-modifiers|,
+                        so ":vert NowebTangled" works.  Neovim only.
+
+                                                        *:NowebMake*
+:NowebMake {cmd}        Tangle the root under the cursor, run {cmd}
+                        ("%" is the tangled file) through nolinemap,
+                        and fill the quickfix list with positions in
+                        the .nw.  Needs a saved buffer.  Neovim only.
+
+==============================================================================
+7. Options                                                    *noweb-options*
+
+                                                       *g:noweb_chunk_options*
+g:noweb_chunk_options   (default 1)  Give the buffer the chunk
+                        language's editing options as the cursor
+                        moves.  See |noweb-chunk-options|.
+
+                                                        *g:noweb_fold*
+g:noweb_fold            (default 0)  Fold by chunk.
+
+                                                        *g:noweb_no_maps*
+g:noweb_no_maps         (default 0)  Install no default mappings at
+                        all.  The |<Plug>| names stay; see
+                        |noweb-mappings|.
+
+                                                        *g:noweb_langrules*
+g:noweb_langrules       (default [])  List of [pattern, filetype]
+                        pairs deciding a chunk's language from its
+                        name, tried before everything else, first
+                        match winning.  Mirrors noweave's -langrule. >
+                            let g:noweb_langrules =
+                                  \ [['^check \[\[.*\.py\]\]', 'python']]
+<
+                                                        *g:noweb_languages*
+g:noweb_languages       (default {})  Per-language configuration for
+                        |noweb-intelligence|, deep-merged over the
+                        defaults.  Keys are filetypes; each may set
+                        "lsp" (the server command), "leader" (the
+                        comment leader for linemark), "filetype" and
+                        "definitions". >
+                            let g:noweb_languages =
+                                  \ #{ python: #{ lsp: ['pyright-langserver',
+                                  \                     '--stdio'] } }
+<
+                                                        *g:noweb_shadow*
+g:noweb_shadow          (default 1)  Enable |noweb-intelligence|.
+
+                                                        *g:noweb_vimtex*
+g:noweb_vimtex          (default 1)  Initialize VimTeX for the prose.
+
+                                                       *g:noweb_tangled_split*
+g:noweb_tangled_split   (default "rightbelow split")  Default split
+                        for |:NowebTangled|.
+
+                                                     *g:noweb_tangled_markers*
+g:noweb_tangled_markers (default 0)  Show linemark's marker comments
+                        in the |:NowebTangled| preview.
+
+                                                      *g:noweb_scan_vimscript*
+g:noweb_scan_vimscript  (default 0)  Use the Vim script occurrence
+                        scan on Neovim too.  An escape hatch.
+
+==============================================================================
+8. Mappings                                                  *noweb-mappings*
+
+Default mappings, all buffer-local:
+
+    ic ac iC aC             |noweb-textobjects|
+    ]] [[ ]m [m ][ []       |noweb-motions|
+    ]c [c                   |noweb-occurrences|
+    K                       hover documentation (Neovim)
+    gd                      go to definition (Neovim)
+
+|g:noweb_no_maps| suppresses all of them.  Any one of them is also
+suppressed individually by binding its |<Plug>| name yourself: >
+
+    nmap <buffer> <Leader>n <Plug>(noweb-next-chunk)
+<
+The names are:
+
+    <Plug>(noweb-inner-chunk)       <Plug>(noweb-a-chunk)
+    <Plug>(noweb-inner-pair)        <Plug>(noweb-a-pair)
+    <Plug>(noweb-next-chunk)        <Plug>(noweb-prev-chunk)
+    <Plug>(noweb-next-code-chunk)   <Plug>(noweb-prev-code-chunk)
+    <Plug>(noweb-next-doc-chunk)    <Plug>(noweb-prev-doc-chunk)
+    <Plug>(noweb-next-occurrence)   <Plug>(noweb-prev-occurrence)
+    <Plug>(noweb-hover)             <Plug>(noweb-definition)
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
 @
 
 \section{Building and maintaining}
