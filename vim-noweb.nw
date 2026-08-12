@@ -386,6 +386,16 @@ lookahead is the safety catch: only a [[[X]]]]-shaped text---noweb
 quoting seen from inside a stolen bracket---matches, never a genuine
 \LaTeX{} [[[options]]] argument.
 
+The stolen-bracket groups are named by pattern, and which of them
+exist depends on the \TeX{} syntax in use: VimTeX has both option
+([[texEnvOpt]], \ldots) and label groups, stock [[tex.vim]] has
+only the former.  A [[containedin]] pattern that matches no
+existing group is not ignored but an error ([[E409]]) that aborts
+the whole definition---under stock [[tex.vim]] the recovery item
+would silently not exist at all.  So each pattern is kept only
+when some group it names is defined, checked against the group
+names the \TeX{} syntax (always sourced just above) registered.
+
 <<recover quoting stolen by \TeX{} option arguments>>=
 " When [[...]] quoting follows a tex command taking an optional argument
 " (\begin{env}, \item, ...), the tex syntax claims the first [ as the
@@ -395,7 +405,21 @@ quoting seen from inside a stolen bracket---matches, never a genuine
 " Recover from inside the stolen bracket: consume the orphaned [content]
 " (which only exists in [X]] shapes, hence the lookahead) so the trailing
 " ] closes the option region on the same line.
-syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1 contained containedin=tex.*Opt,tex.*Label
+" Which of these group families exist depends on the tex syntax (vimtex
+" has Label groups, stock tex.vim does not), and a containedin pattern
+" matching no group is E409 -- keep only the patterns that name one.
+let s:texgroups = getcompletion('tex', 'highlight')
+let s:orphan_in = []
+for s:pat in ['tex.*Opt', 'tex.*Label']
+  if match(s:texgroups, '^' . s:pat . '$') >= 0
+    call add(s:orphan_in, s:pat)
+  endif
+endfor
+if !empty(s:orphan_in)
+  execute 'syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1'
+        \ 'contained containedin=' . join(s:orphan_in, ',')
+endif
+unlet! s:texgroups s:orphan_in s:pat
 @
 
 \subsection{The fallback chunk region}
@@ -1183,25 +1207,53 @@ own constructs, say the [[test]] brackets of
 
 \noindent
 sits where only shell items may match, and the here-doc rule
-swallows the rest of the chunk unopposed.  So the reference is
-also [[containedin]] every included cluster: it may then match
-inside any construct of any included language---strings and
-comments included, which is exactly noweb's semantics, since
-notangle expands a use wherever it stands.
+swallows the rest of the chunk unopposed.
+
+Naming the included cluster in [[containedin]] is not enough,
+though it reaches that [[if]]: [[:syntax include]] puts only a
+file's \emph{top-level} items into the cluster, so a reference in
+the body of [[main() { ... }]] is still out of reach---function
+bodies, strings and comments are themselves [[contained]] items,
+invisible to the cluster.  ([[ALLBUT]] would say \enquote{anywhere
+but prose} directly, but inside [[containedin]] it turns out to
+admit the item nowhere, and plain [[ALL]] lets references loose in
+the prose.)  What does reach them is the naming convention this
+plugin already leans on for [[containedin=tex.*]]: a syntax file
+prefixes its groups with its language's name, so the pattern
+[[sh.*]] names every shell group, contained or not.  The reference
+is therefore [[containedin]] each included language's cluster
+\emph{and} name pattern: it may then match inside any construct of
+any included language---strings and comments included, which is
+exactly noweb's semantics, since notangle expands a use wherever
+it stands.  One trap remains: a group pattern that matches no
+existing group is an error ([[E409]]) that aborts the whole
+definition, so a language contributes its pattern only when some
+group actually carries its prefix.
 
 <<redefine [[nowebChunkRef]] after the includes>>=
 " Must be (re)defined after every :syntax include above: at the same
 " start position the last-defined item wins (:h syn-priority), which is
 " what lets chunk refs beat e.g. shHereDoc's @<<-pattern inside sh chunks.
 " containedin= lets that tie happen anywhere inside the included
-" languages' own items (sh's if-statements, strings, ...), where the
-" contains= lists of our regions do not reach.  First/last name chars
-" must be non-space, so `cat @<<EOF @>> log` stays a here-doc.  syntax
-" clear keeps the group id (contains= refs stay valid) while preventing
-" pattern accumulation across refreshes.
+" languages' own items: the cluster admits the ref in a language's
+" top-level items, the name pattern (lang.*) in its contained ones
+" (sh's function bodies, strings, ...).  A pattern matching no group
+" is E409 and aborts the definition, hence the guard.  First/last name
+" chars must be non-space, so `cat @<<EOF @>> log` stays a here-doc.
+" syntax clear keeps the group id (contains= refs stay valid) while
+" preventing pattern accumulation across refreshes.
 silent! syntax clear nowebChunkRef
-let l:incl = join(map(sort(filter(values(b:noweb_included),
-      \ 'v:val !=# ""')), '"@" . v:val'), ',')
+let l:incl = []
+for [l:lang, l:cluster] in items(b:noweb_included)
+  if l:cluster ==# ''
+    continue
+  endif
+  call add(l:incl, '@' . l:cluster)
+  if l:lang =~# '^\w\+$' && !empty(getcompletion(l:lang, 'highlight'))
+    call add(l:incl, l:lang . '.*')
+  endif
+endfor
+let l:incl = join(sort(l:incl), ',')
 execute 'syntax match nowebChunkRef'
       \ '/@<<\%([^ ]\|[^ ].\{-}[^ ]\)@>>/'
       \ 'contained contains=nowebTT'

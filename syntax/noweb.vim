@@ -99,7 +99,21 @@ syn region  nowebName   start="<<" end=">>" oneline contains=nowebTT containedin
 " Recover from inside the stolen bracket: consume the orphaned [content]
 " (which only exists in [X]] shapes, hence the lookahead) so the trailing
 " ] closes the option region on the same line.
-syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1 contained containedin=tex.*Opt,tex.*Label
+" Which of these group families exist depends on the tex syntax (vimtex
+" has Label groups, stock tex.vim does not), and a containedin pattern
+" matching no group is E409 -- keep only the patterns that name one.
+let s:texgroups = getcompletion('tex', 'highlight')
+let s:orphan_in = []
+for s:pat in ['tex.*Opt', 'tex.*Label']
+  if match(s:texgroups, '^' . s:pat . '$') >= 0
+    call add(s:orphan_in, s:pat)
+  endif
+endfor
+if !empty(s:orphan_in)
+  execute 'syn match nowebTTOrphan /\[[^][]*\]\]\@=/hs=s+1,he=e-1'
+        \ 'contained containedin=' . join(s:orphan_in, ',')
+endif
+unlet! s:texgroups s:orphan_in s:pat
 
 " NOWEB code chunks are defined by <<chunk_name>>= and ended by the next
 " "@" (not a "@@"!) in the first column of a line, or implicitly by the

@@ -313,14 +313,25 @@ function! noweb#refresh() abort
   " start position the last-defined item wins (:h syn-priority), which is
   " what lets chunk refs beat e.g. shHereDoc's <<-pattern inside sh chunks.
   " containedin= lets that tie happen anywhere inside the included
-  " languages' own items (sh's if-statements, strings, ...), where the
-  " contains= lists of our regions do not reach.  First/last name chars
-  " must be non-space, so `cat <<EOF >> log` stays a here-doc.  syntax
-  " clear keeps the group id (contains= refs stay valid) while preventing
-  " pattern accumulation across refreshes.
+  " languages' own items: the cluster admits the ref in a language's
+  " top-level items, the name pattern (lang.*) in its contained ones
+  " (sh's function bodies, strings, ...).  A pattern matching no group
+  " is E409 and aborts the definition, hence the guard.  First/last name
+  " chars must be non-space, so `cat <<EOF >> log` stays a here-doc.
+  " syntax clear keeps the group id (contains= refs stay valid) while
+  " preventing pattern accumulation across refreshes.
   silent! syntax clear nowebChunkRef
-  let l:incl = join(map(sort(filter(values(b:noweb_included),
-        \ 'v:val !=# ""')), '"@" . v:val'), ',')
+  let l:incl = []
+  for [l:lang, l:cluster] in items(b:noweb_included)
+    if l:cluster ==# ''
+      continue
+    endif
+    call add(l:incl, '@' . l:cluster)
+    if l:lang =~# '^\w\+$' && !empty(getcompletion(l:lang, 'highlight'))
+      call add(l:incl, l:lang . '.*')
+    endif
+  endfor
+  let l:incl = join(sort(l:incl), ',')
   execute 'syntax match nowebChunkRef'
         \ '/<<\%([^ ]\|[^ ].\{-}[^ ]\)>>/'
         \ 'contained contains=nowebTT'
