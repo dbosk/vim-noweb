@@ -69,8 +69,10 @@ jumps back and |g]| lists them all.
 header -- jumps to that chunk's first definition, in prose as well as
 in code, and in plain Vim as well as Neovim.  It pushes the tag stack
 too, so |CTRL-T| comes back; use |CTRL-]| instead when you want
-|:tnext| over the appends afterwards.  Off a chunk name, `gd` is
-|noweb-intelligence|'s.
+|:tnext| over the appends afterwards.  `K` on a chunk name previews
+that chunk's first definition in a popup that the next cursor move
+closes; appends are counted in it, |g]| lists them.  Off a chunk
+name, `K` and `gd` are |noweb-intelligence|'s.
 
                                                         *noweb-occurrences*
 ]c and [c step through every occurrence -- definition or use -- of the
@@ -141,9 +143,9 @@ back into the noweb source:
 - diagnostics appear on the offending chunk lines as you type;
 - completion inside a chunk comes from the language server, through
   the same 'omnifunc';
-- `K` shows hover documentation and `gd`, off a chunk name
-  (|noweb-tags|), jumps to a code identifier's definition, landing in
-  the right chunk even across chunks.  With no language
+- off a chunk name (|noweb-tags|), `K` shows hover documentation and
+  `gd` jumps to a code identifier's definition, landing in the right
+  chunk even across chunks.  With no language
   server, `gd` falls back to language-aware definition patterns over
   the whole tangle;
 - |:NowebFillChunk| re-indents a code chunk with the language's own
@@ -266,7 +268,8 @@ Default mappings, all buffer-local:
     ic ac iC aC             |noweb-textobjects|
     ]] [[ ]m [m ][ []       |noweb-motions|
     ]c [c                   |noweb-occurrences|
-    K                       hover documentation (Neovim)
+    K                       hover -- preview the chunk under the
+                            cursor, or (Neovim) code documentation
     gd                      go to definition -- the chunk under the
                             cursor, or (Neovim) the code identifier
 

@@ -708,8 +708,14 @@ endfunction
 
 " K / gd with shadow-LSP answers inside code chunks, falling back to
 " the built-in behaviour elsewhere.  A chunk name is answered before
-" either: it is the one piece of code the tangle has no line for.
+" either fallback: it is the one piece of code the tangle has no
+" line for.
 function! noweb#hover() abort
+  let l:name = s:chunk_at_cursor()
+  if l:name !=# ''
+    call s:chunk_preview(l:name)
+    return
+  endif
   if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
     normal! K
   endif
@@ -729,6 +735,35 @@ endfunction
 function! s:shadowed() abort
   return has('nvim') && get(g:, 'noweb_shadow', 1)
         \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+endfunction
+
+" Hover for a chunk name: its first definition, whole, in a float
+" (Neovim) or popup (Vim) that the next cursor move closes, with a
+" count of the remaining definitions.
+function! s:chunk_preview(name) abort
+  let l:defs = get(s:chunk_occurrences(), a:name, {'defs': []}).defs
+  if empty(l:defs)
+    echohl WarningMsg
+    echomsg 'noweb: no definition of <<' . a:name . '>>'
+    echohl None
+    return
+  endif
+  let l:c = s:chunk_bounds(l:defs[0][0])
+  let l:lines = getline(l:c.head, l:c.last)
+  if len(l:defs) > 1
+    call add(l:lines, '(+' . (len(l:defs) - 1) . ' more, g] lists them)')
+  endif
+  if has('nvim')
+    call luaeval('vim.lsp.util.open_floating_preview(_A, nil,'
+          \ . ' {focus_id = "noweb_chunk"})', l:lines)
+  elseif exists('*popup_atcursor')
+    " A repeated K would stack an identical popup on the first: the
+    " old one only closes when the cursor moves.
+    silent! call popup_close(get(s:, 'preview_id', -1))
+    let s:preview_id = popup_atcursor(l:lines, {'padding': [0, 1, 0, 1]})
+  else
+    echo l:lines[0] . ' (' . (l:c.last - l:c.head) . ' more lines)'
+  endif
 endfunction
 
 " Where chunks begin and end.  s:DEFLINE starts a code chunk,

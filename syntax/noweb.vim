@@ -2,8 +2,8 @@
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-12
-" Version:		1.8.1
+" Date:			2026-08-14
+" Version:		1.8.2
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,9 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.2: K on a chunk name previews that chunk's first definition in
+"       a self-closing popup, in prose and in plain Vim as well; it
+"       used to page 'keywordprg' with one word of the name.
 " v1.8.1: gd on a chunk name -- a reference, or a <<name>>= header --
 "       goes to that chunk's first definition, in prose and in plain
 "       Vim as well; only off a chunk name is it still the shadow's
