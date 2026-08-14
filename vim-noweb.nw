@@ -83,6 +83,11 @@ The plugin's lineage, version by version:
 \item[v1.8] editing \emph{in} chunks: text objects, motions,
   chunk-aware filling, per-chunk editing options and folding
   (\cref{sec:editing}), and a help file (\cref{sec:helpfile}).
+\item[v1.8.1] [[gd]] on a chunk name goes to the chunk's definition
+  instead of guessing at a word of it (\cref{sec:hoverdef}).
+\item[v1.8.2] \texttt{K} on a chunk name previews the chunk's first
+  definition instead of paging one word of it through
+  [['keywordprg']] (\cref{sec:hoverdef}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -248,8 +253,8 @@ ignores it but archaeologists should not have to run [[git log]].
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-10
-" Version:		1.8
+" Date:			2026-08-14
+" Version:		1.8.2
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -257,6 +262,14 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.2: K on a chunk name previews that chunk's first definition in
+"       a self-closing popup, in prose and in plain Vim as well; it
+"       used to page 'keywordprg' with one word of the name.
+" v1.8.1: gd on a chunk name -- a reference, or a @<<name@>>= header --
+"       goes to that chunk's first definition, in prose and in plain
+"       Vim as well; only off a chunk name is it still the shadow's
+"       goto-def.  It used to be the shadow's everywhere, which on a
+"       chunk name meant the built-in gd searching for one word of it.
 " v1.8: Editing in chunks: the ic/ac/iC/aC text objects and the
 "       ]] [[ ]m [m ][ [] motions; chunk-aware gq (each chunk filled
 "       within its own bounds, [[...]] quotes never broken) and
@@ -3182,19 +3195,22 @@ endif
 built-in behaviour ([['keywordprg']] and the local-declaration
 search) whenever the cursor is outside every shadow or the server
 has nothing to say---so the maps are safe buffer-wide, prose
-included.  Chunk references keep their own goto: \texttt{CTRL-]}
-through the tagfunc (\cref{sec:tagfunc}) is untouched.
+included.
 
 <<[[noweb#hover]] and [[noweb#definition]]>>=
 " K / gd with shadow-LSP answers inside code chunks, falling back to
-" the built-in behaviour elsewhere.
+" the built-in behaviour elsewhere.  A chunk name is answered before
+" either fallback: it is the one piece of code the tangle has no
+" line for.
 function! noweb#hover() abort
+  <<a chunk name answers [[K]] itself>>
   if !s:shadowed() || !luaeval('require("noweb.shadow").hover()')
     normal! K
   endif
 endfunction
 
 function! noweb#definition() abort
+  <<a chunk name answers [[gd]] itself>>
   if !s:shadowed() || !luaeval('require("noweb.shadow").definition()')
     normal! gd
   endif
@@ -3203,6 +3219,117 @@ endfunction
 function! s:shadowed() abort
   return has('nvim') && get(g:, 'noweb_shadow', 1)
         \ && luaeval('require("noweb.shadow").locate(0, _A) ~= nil', line('.'))
+endfunction
+@
+
+There is one piece of code that fallback answers badly, and it is
+noweb's own.  A chunk reference is code---it sits in a code chunk and
+it is what the chunk is made of---but it is the only code the tangle
+keeps no counterpart for: a use alone on its line is spliced away
+rather than tangled (\cref{sec:shadow}), so that line has no forward
+map and [[s:shadowed]] reports the cursor as outside every shadow.
+The built-in [[gd]] takes over and searches for the word under the
+cursor---one \emph{word} of a name that noweb allows to contain
+blanks---landing wherever that word first occurs, in prose or in an
+unrelated chunk.  Meanwhile the question the cursor is plainly asking,
+\enquote{where is this chunk defined?}, is one the buffer can answer
+exactly.
+
+So the chunk gets the first word.  The interception is narrow because
+[[s:chunk_at_cursor]] (\cref{sec:refsonline}) is narrow: it is
+non-empty only on a definition header or inside a reference's
+brackets, so code sharing a line with a use---the
+[[foo(@<<args@>>)]] case---still reaches the language server, and only
+the name itself is taken.  It is also the half of [[gd]] that needs no
+Neovim: the cursor test and the occurrence inventory behind it are
+Vim script, so chunk names resolve in plain Vim and with
+[[g:noweb_shadow]] switched off, where the rest of this section does
+nothing at all.
+
+<<a chunk name answers [[gd]] itself>>=
+let l:name = s:chunk_at_cursor()
+if l:name !=# ''
+  call noweb#goto(l:name)
+  return
+endif
+@
+
+The jump is [[:NowebGoto]]'s (\cref{sec:goto}) rather than
+\texttt{CTRL-]}'s, although the tagfunc (\cref{sec:tagfunc}) is right
+there and would additionally leave [[:tnext]] armed to walk the
+appends.  That difference is the reason to keep the two apart.  In Vim
+[[gd]] asks the singular question---\emph{the} declaration---while
+\texttt{CTRL-]}, [[:tnext]] and \texttt{g]} ask the plural one, and a
+chunk defined five times is precisely when a reader wants to be
+offered the five.  Two keys, two questions.  Going through
+[[noweb#goto]] also keeps the diagnosis ours: a name that is
+referenced but never defined is reported as such, quoting the whole
+name, where the tag route would raise [[E426]] against a single word
+of it.
+
+The same wrong guess awaited \texttt{K}: hover on a chunk name fell
+through to [['keywordprg']], which went looking for one word of the
+name in the manual.  Here the cursor's question is not \enquote{where
+is this defined?} but \enquote{what is this?}---and what a chunk
+\emph{is} is its code.  So hover shows the first definition itself,
+whole, from its [[@<<name@>>=]] header to its last line, read
+straight out of the buffer with the bounds scanner the text objects
+already use (\cref{sec:bounds}).  Appends are counted rather than
+shown: hover keeps the singular answer for the same reason [[gd]]
+does, and the trailing count points at \texttt{g]}, the key that
+owns the plural one.
+
+<<a chunk name answers [[K]] itself>>=
+let l:name = s:chunk_at_cursor()
+if l:name !=# ''
+  call s:chunk_preview(l:name)
+  return
+endif
+@
+
+The window is [[vim.lsp.util.open_floating_preview]] on Neovim---the
+same face the shadow's hover wears, so [[K]] looks the same whichever
+half answers, and a second [[K]] focuses the float to scroll a long
+chunk---and [[popup_atcursor]] on Vim; both close on the next cursor
+motion, so dismissing the preview costs no keystroke.  A Vim too old
+for popups gets the header echoed with a line count: less, but still
+the right chunk rather than a wrong manual page.  The preview is
+plain text, not noweb-highlighted: our syntax script is no passive
+pattern set---loading it runs the language inference and installs
+buffer-local commands and autocmds (\cref{sec:refresh})---far too
+much machinery to drag into a throwaway scratch buffer.  An undefined
+name gets the same diagnosis [[noweb#goto]] gives, quoting the whole
+name.
+
+<<[[noweb#hover]] and [[noweb#definition]]>>=
+
+" Hover for a chunk name: its first definition, whole, in a float
+" (Neovim) or popup (Vim) that the next cursor move closes, with a
+" count of the remaining definitions.
+function! s:chunk_preview(name) abort
+  let l:defs = get(s:chunk_occurrences(), a:name, {'defs': []}).defs
+  if empty(l:defs)
+    echohl WarningMsg
+    echomsg 'noweb: no definition of @<<' . a:name . '@>>'
+    echohl None
+    return
+  endif
+  let l:c = s:chunk_bounds(l:defs[0][0])
+  let l:lines = getline(l:c.head, l:c.last)
+  if len(l:defs) > 1
+    call add(l:lines, '(+' . (len(l:defs) - 1) . ' more, g] lists them)')
+  endif
+  if has('nvim')
+    call luaeval('vim.lsp.util.open_floating_preview(_A, nil,'
+          \ . ' {focus_id = "noweb_chunk"})', l:lines)
+  elseif exists('*popup_atcursor')
+    " A repeated K would stack an identical popup on the first: the
+    " old one only closes when the cursor moves.
+    silent! call popup_close(get(s:, 'preview_id', -1))
+    let s:preview_id = popup_atcursor(l:lines, {'padding': [0, 1, 0, 1]})
+  else
+    echo l:lines[0] . ' (' . (l:c.last - l:c.head) . ' more lines)'
+  endif
 endfunction
 @
 
@@ -5196,6 +5323,15 @@ reference jumps to the definition, |:tnext| steps through the appends
 (a chunk defined several times has several tag matches), |CTRL-T|
 jumps back and |g]| lists them all.
 
+`gd` on a chunk name -- a reference, or anywhere on a "@<<name@>>="
+header -- jumps to that chunk's first definition, in prose as well as
+in code, and in plain Vim as well as Neovim.  It pushes the tag stack
+too, so |CTRL-T| comes back; use |CTRL-]| instead when you want
+|:tnext| over the appends afterwards.  `K` on a chunk name previews
+that chunk's first definition in a popup that the next cursor move
+closes; appends are counted in it, |g]| lists them.  Off a chunk
+name, `K` and `gd` are |noweb-intelligence|'s.
+
                                                         *noweb-occurrences*
 ]c and [c step through every occurrence -- definition or use -- of the
 chunk under the cursor, wrapping.  |:NowebRefs| collects them all in
@@ -5265,8 +5401,9 @@ back into the noweb source:
 - diagnostics appear on the offending chunk lines as you type;
 - completion inside a chunk comes from the language server, through
   the same 'omnifunc';
-- `K` shows hover documentation and `gd` jumps to a definition,
-  landing in the right chunk even across chunks.  With no language
+- off a chunk name (|noweb-tags|), `K` shows hover documentation and
+  `gd` jumps to a code identifier's definition, landing in the right
+  chunk even across chunks.  With no language
   server, `gd` falls back to language-aware definition patterns over
   the whole tangle;
 - |:NowebFillChunk| re-indents a code chunk with the language's own
@@ -5389,8 +5526,10 @@ Default mappings, all buffer-local:
     ic ac iC aC             |noweb-textobjects|
     ]] [[ ]m [m ][ []       |noweb-motions|
     ]c [c                   |noweb-occurrences|
-    K                       hover documentation (Neovim)
-    gd                      go to definition (Neovim)
+    K                       hover -- preview the chunk under the
+                            cursor, or (Neovim) code documentation
+    gd                      go to definition -- the chunk under the
+                            cursor, or (Neovim) the code identifier
 
 |g:noweb_no_maps| suppresses all of them.  Any one of them is also
 suppressed individually by binding its |<Plug>| name yourself: >
