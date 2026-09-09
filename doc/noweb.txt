@@ -247,6 +247,8 @@ g:noweb_shadow          (default 1)  Enable |noweb-intelligence|.
 
                                                         *g:noweb_vimtex*
 g:noweb_vimtex          (default 1)  Initialize VimTeX for the prose.
+                        VimTeX's insert-mode ]] (its delimiter closer)
+                        is unmapped, so ]] closes a quote.
 
                                                        *g:noweb_tangled_split*
 g:noweb_tangled_split   (default "rightbelow split")  Default split

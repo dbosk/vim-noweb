@@ -88,6 +88,9 @@ The plugin's lineage, version by version:
 \item[v1.8.2] \texttt{K} on a chunk name previews the chunk's first
   definition instead of paging one word of it through
   [['keywordprg']] (\cref{sec:hoverdef}).
+\item[v1.8.3] typing [[]]]] in insert mode closes a quote again
+  instead of leaving [[]^F]] behind: VimTeX's delimiter closer is
+  unmapped for the prose (\cref{sec:vimtexprose}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -253,8 +256,8 @@ ignores it but archaeologists should not have to run [[git log]].
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-08-14
-" Version:		1.8.2
+" Date:			2026-09-09
+" Version:		1.8.3
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -262,6 +265,11 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.3: ]] in insert mode closes a quote again.  VimTeX maps it to
+"       its delimiter closer, which inserts one ] plus a CTRL-F meant
+"       for a 'tex' indent script noweb buffers never load, so the
+"       CTRL-F landed in the buffer as ^F.  The mapping is now removed
+"       after vimtex#init().
 " v1.8.2: K on a chunk name previews that chunk's first definition in
 "       a self-closing popup, in prose and in plain Vim as well; it
 "       used to page 'keywordprg' with one word of the name.
@@ -3531,12 +3539,26 @@ it, though, and the difference costs the prose some highlighting.  The
 last call repairs it; \cref{sec:vimtexpackages} explains what it is
 repairing.
 
+One mapping has to go.  VimTeX binds [[]]]] in insert mode to its
+delimiter closer, which looks back for the nearest unclosed [[(]],
+[[[]] or [[{]] and inserts the matching closer followed by a
+[[CTRL-F]].  That [[CTRL-F]] is meant for VimTeX's [[tex]] indent
+script, whose [['indentkeys']] swallow it as a reindent request; the
+script is loaded by filetype, so a noweb buffer never has it, and
+the byte lands in the text as [[^F]].  Worse, in noweb [[]]]] is
+first of all the quote closer: after [[[[name]] the closer sees one
+unmatched [[[]], inserts a single [[]]] and the reader gets
+[[[[name]^F]].  The mapping is buffer-local and made after
+[[vimtex#init()]] returns, so it is undone right there; the mapping
+that stays is our own [[]]]] in normal mode, the next-chunk motion.
+
 <<initialize VimTeX for the prose>>=
 if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
       \ && !empty(globpath(&runtimepath, 'autoload/vimtex.vim'))
   let s:undo = b:undo_ftplugin
   unlet b:undo_ftplugin
   silent! call vimtex#init()
+  silent! iunmap <buffer> ]]
   let b:undo_ftplugin = s:undo
         \ . (empty(get(b:, 'undo_ftplugin', ''))
         \    ? '' : ' | ' . b:undo_ftplugin)
@@ -5505,6 +5527,8 @@ g:noweb_shadow          (default 1)  Enable |noweb-intelligence|.
 
                                                         *g:noweb_vimtex*
 g:noweb_vimtex          (default 1)  Initialize VimTeX for the prose.
+                        VimTeX's insert-mode ]] (its delimiter closer)
+                        is unmapped, so ]] closes a quote.
 
                                                        *g:noweb_tangled_split*
 g:noweb_tangled_split   (default "rightbelow split")  Default split
