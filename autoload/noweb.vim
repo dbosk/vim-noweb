@@ -1078,6 +1078,22 @@ function! noweb#fill_chunk() abort
     call winrestview(l:view)
   endtry
 endfunction
+" Arm gw: remember the view while the cursor is still the user's, then
+" hand over to g@.  The mapping is <expr> so a count passes through.
+function! noweb#format_keep_op() abort
+  let s:keep_view = winsaveview()
+  set operatorfunc=noweb#format_keep
+  return 'g@'
+endfunction
+
+" gw's operator: gq over the operated lines, view put back.
+function! noweb#format_keep(type) abort
+  try
+    call s:normal_over(line("'["), line("']"), 'gq')
+  finally
+    call winrestview(s:keep_view)
+  endtry
+endfunction
 
 " The buffer-local options a chunk's language should own.  Not
 " 'textwidth': ftplugins mostly leave it alone and users mostly do

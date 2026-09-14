@@ -83,6 +83,25 @@ command! -buffer NowebFillChunk call noweb#fill_chunk()
 let b:undo_ftplugin .= ' | setlocal formatexpr<'
       \ . ' | silent! delcommand -buffer NowebFillChunk'
 
+" gw / gww -- chunk-aware gq that puts the cursor back.
+nnoremap <silent> <expr> <Plug>(noweb-format-keep) noweb#format_keep_op()
+xnoremap <silent> <expr> <Plug>(noweb-format-keep) noweb#format_keep_op()
+nnoremap <silent> <expr> <Plug>(noweb-format-keep-line)
+      \ noweb#format_keep_op() . '_'
+if !get(g:, 'noweb_no_maps', 0)
+  for s:mode in ['n', 'x']
+    if !hasmapto('<Plug>(noweb-format-keep)', s:mode)
+      execute s:mode . 'map <buffer> gw <Plug>(noweb-format-keep)'
+    endif
+  endfor
+  if !hasmapto('<Plug>(noweb-format-keep-line)', 'n')
+    nmap <buffer> gww <Plug>(noweb-format-keep-line)
+  endif
+  unlet! s:mode
+endif
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> gw'
+      \ . ' | silent! xunmap <buffer> gw | silent! nunmap <buffer> gww'
+
 if get(g:, 'noweb_chunk_options', 1)
   augroup nowebChunkOptions
     autocmd! * <buffer>

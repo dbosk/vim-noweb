@@ -95,6 +95,9 @@ The plugin's lineage, version by version:
   [['formatoptions']] no longer scatters the characters over lines of
   their own: the formatexpr now leaves every Insert-mode call to the
   built-in formatter (\cref{sec:format}).
+\item[v1.8.5] [[gw]] understands chunks too: it is mapped to run the
+  chunk-aware fill and put the cursor back, since Vim's own [[gw]]
+  never consults [['formatexpr']] (\cref{sec:formatkeep}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -261,7 +264,7 @@ ignores it but archaeologists should not have to run [[git log]].
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-09-14
-" Version:		1.8.4
+" Version:		1.8.5
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -269,6 +272,10 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.5: gw and gww fill chunk-aware and put the cursor back.  Vim's
+"       own gw skips 'formatexpr' by design, so in a noweb buffer it
+"       reflowed straight through chunk headers; it is now a mapping
+"       over the same code gq uses.
 " v1.8.4: typing past 'textwidth' with the a flag in 'formatoptions'
 "       keeps the line whole.  Vim's auto-format calls 'formatexpr'
 "       once per keystroke with v:char empty, which the formatexpr
@@ -759,6 +766,7 @@ happens to be pedagogical order as well:
 <<[[noweb#format]]>>
 
 <<[[noweb#fill_chunk]]>>
+<<[[noweb#format_keep]]>>
 
 <<the per-chunk options>>
 
@@ -4789,6 +4797,56 @@ function! s:scratch_indent(ft, first, last) abort
 endfunction
 @
 
+\subsection{Formatting and staying put}
+\label{sec:formatkeep}
+
+[[gw]] is [[gq]] with one promise added: the cursor stays on the text
+character it was on.  Vim can keep that promise only because its
+internal formatter tracks the cursor through the reflow, and it is not
+willing to trust a [['formatexpr']] with it, so [[gw]] never consults
+one---in a noweb buffer it reflowed straight through chunk headers and
+split quotes, everything \cref{sec:format} exists to prevent, and
+until v1.8.4 the help file said otherwise.  There is no hook to
+correct this at; [[gw]] has to be taken as a key.
+
+What the key runs is [[gq]] itself, over the same lines, with the
+view saved and restored around it---the arrangement
+[[:NowebFillChunk]] already relies on.  That keeps the cursor by
+\emph{position} rather than by text character: after a reflow that
+moves words across lines the cursor can land on a different word
+than Vim's own [[gw]] would have kept it on.  The weaker promise is
+stated in the help file rather than papered over; the alternative,
+tracking the cursor through [[s:format_piece]]'s quote hiding and
+re-showing, would cost more than the difference is worth.
+
+An operator has to be an [['operatorfunc']]: Vim calls it after the
+motion with the operated lines in the [[[]] and [[]]] marks---and with
+the cursor already moved to the start of them, so by then the view
+worth keeping is gone.  It is saved a step earlier, when the operator
+is armed: the [[<expr>]] mapping evaluates while the cursor is still
+where the user left it, and returns [[g@]] so that a count typed
+before [[gww]] survives, which it would not through a [[:<C-u>]]
+mapping.
+
+<<[[noweb#format_keep]]>>=
+" Arm gw: remember the view while the cursor is still the user's, then
+" hand over to g@.  The mapping is <expr> so a count passes through.
+function! noweb#format_keep_op() abort
+  let s:keep_view = winsaveview()
+  set operatorfunc=noweb#format_keep
+  return 'g@'
+endfunction
+
+" gw's operator: gq over the operated lines, view put back.
+function! noweb#format_keep(type) abort
+  try
+    call s:normal_over(line("'["), line("']"), 'gq')
+  finally
+    call winrestview(s:keep_view)
+  endtry
+endfunction
+@
+
 \subsection{Editing options that follow the cursor}
 \label{sec:chunkopts}
 
@@ -5247,15 +5305,37 @@ endfor
 unlet! s:key s:plug s:args s:mode
 @
 
-The formatting hook takes no keys at all: [[gq]] and [[gw]] already
-route through [['formatexpr']], so setting it is the whole
-installation.
+[[gq]] routes through [['formatexpr']], so for it setting the option
+is the whole installation.  [[gw]] does not (\cref{sec:formatkeep}),
+so it takes two keys, under the same discipline as the others: the
+operator itself in Normal and Visual mode, and [[gww]] for the current
+line, which is the operator over the [[_]] motion so that a count
+still means lines.
 
 <<the formatting hook and the [[:NowebFillChunk]] command>>=
 setlocal formatexpr=noweb#format()
 command! -buffer NowebFillChunk call noweb#fill_chunk()
 let b:undo_ftplugin .= ' | setlocal formatexpr<'
       \ . ' | silent! delcommand -buffer NowebFillChunk'
+
+" gw / gww -- chunk-aware gq that puts the cursor back.
+nnoremap <silent> <expr> <Plug>(noweb-format-keep) noweb#format_keep_op()
+xnoremap <silent> <expr> <Plug>(noweb-format-keep) noweb#format_keep_op()
+nnoremap <silent> <expr> <Plug>(noweb-format-keep-line)
+      \ noweb#format_keep_op() . '_'
+if !get(g:, 'noweb_no_maps', 0)
+  for s:mode in ['n', 'x']
+    if !hasmapto('<Plug>(noweb-format-keep)', s:mode)
+      execute s:mode . 'map <buffer> gw <Plug>(noweb-format-keep)'
+    endif
+  endfor
+  if !hasmapto('<Plug>(noweb-format-keep-line)', 'n')
+    nmap <buffer> gww <Plug>(noweb-format-keep-line)
+  endif
+  unlet! s:mode
+endif
+let b:undo_ftplugin .= ' | silent! nunmap <buffer> gw'
+      \ . ' | silent! xunmap <buffer> gw | silent! nunmap <buffer> gww'
 @
 
 The options hook needs an autocommand, and one that fires often; the
@@ -5443,8 +5523,12 @@ fill, so a quote is never broken across two lines.
 
 Wrapping as you type and the 'a' flag of 'formatoptions' are left to
 Vim's built-in formatter, which can break a quote; gq puts it back
-together.  |gw| never consults 'formatexpr' and so knows nothing of
-chunks.
+together.
+
+gw and gww are mapped to do what gq does and then put the cursor back
+where it was -- by line and column, so after a reflow it may sit on a
+different word than Vim's own |gw| would have kept it on.  Vim's gw
+never consults 'formatexpr', which is why it is a mapping.
 
 |:NowebFillChunk| formats the whole chunk the cursor is in: filling it
 if it is prose, re-indenting it if it is code.
@@ -5600,6 +5684,7 @@ Default mappings, all buffer-local:
     ic ac iC aC             |noweb-textobjects|
     ]] [[ ]m [m ][ []       |noweb-motions|
     ]c [c                   |noweb-occurrences|
+    gw gww                  |noweb-formatting|
     K                       hover -- preview the chunk under the
                             cursor, or (Neovim) code documentation
     gd                      go to definition -- the chunk under the
@@ -5619,6 +5704,7 @@ The names are:
     <Plug>(noweb-next-doc-chunk)    <Plug>(noweb-prev-doc-chunk)
     <Plug>(noweb-next-occurrence)   <Plug>(noweb-prev-occurrence)
     <Plug>(noweb-hover)             <Plug>(noweb-definition)
+    <Plug>(noweb-format-keep)       <Plug>(noweb-format-keep-line)
 
 ==============================================================================
 vim:tw=78:ts=8:noet:ft=help:norl:

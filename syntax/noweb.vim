@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-09-14
-" Version:		1.8.4
+" Version:		1.8.5
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,10 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.5: gw and gww fill chunk-aware and put the cursor back.  Vim's
+"       own gw skips 'formatexpr' by design, so in a noweb buffer it
+"       reflowed straight through chunk headers; it is now a mapping
+"       over the same code gq uses.
 " v1.8.4: typing past 'textwidth' with the a flag in 'formatoptions'
 "       keeps the line whole.  Vim's auto-format calls 'formatexpr'
 "       once per keystroke with v:char empty, which the formatexpr
