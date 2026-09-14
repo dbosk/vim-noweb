@@ -41,7 +41,11 @@ use-first-define-later workflow.
 Chunk definitions resolve as tags: `<C-]>` on a reference jumps to
 the definition, `:tnext` steps through the appends (a chunk defined
 several times has several tag matches), `<C-t>` jumps back and `g]`
-lists them all.  `]c` / `[c` step through every occurrence
+lists them all.  `gd` on a chunk name jumps to its first definition —
+in prose too, and in plain Vim; use `<C-]>` instead when you want
+`:tnext` over the appends afterwards.  `K` on a chunk name previews
+that chunk's first definition in a popup that the next cursor move
+closes.  `]c` / `[c` step through every occurrence
 (definitions and uses) of the chunk under the cursor, and
 `:NowebRefs` collects them in the location list.  Set
 `g:noweb_no_maps` to keep the bracket maps unmapped, or bind the
@@ -89,8 +93,9 @@ Results map back into the noweb source:
 - **completion** inside a chunk comes from the language server
   (through the same omnifunc, so YCM and friends pick it up; `.`
   triggers it);
-- **`K`** shows hover documentation, **`gd`** jumps to a definition —
-  landing in the right chunk of the `.nw`, even across chunks.  With
+- off a chunk name, **`K`** shows hover documentation and **`gd`**
+  jumps to a code identifier's definition, landing in the right chunk
+  of the `.nw`, even across chunks.  With
   no language server, `gd` falls back to language-aware definition
   patterns over the whole tangle (shell functions, `def`/`class`,
   make targets, …; tune via `definitions` in `g:noweb_languages`);

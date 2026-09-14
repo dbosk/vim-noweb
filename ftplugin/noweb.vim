@@ -138,6 +138,7 @@ if get(g:, 'noweb_vimtex', 1) && !exists('b:vimtex')
   let s:undo = b:undo_ftplugin
   unlet b:undo_ftplugin
   silent! call vimtex#init()
+  silent! iunmap <buffer> ]]
   let b:undo_ftplugin = s:undo
         \ . (empty(get(b:, 'undo_ftplugin', ''))
         \    ? '' : ' | ' . b:undo_ftplugin)
