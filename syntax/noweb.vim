@@ -3,7 +3,7 @@
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
 " Date:			2026-09-14
-" Version:		1.8.5
+" Version:		1.8.6
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -11,6 +11,11 @@
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.6: CTRL-X CTRL-O inside a chunk no longer dies with E565.  Vim
+"       holds the textlock while an omnifunc runs, which forbids
+"       rewriting any buffer, the shadow included; a query under the
+"       lock now answers from the last sync, and the shadow also
+"       re-syncs while typing so that sync is a recent one.
 " v1.8.5: gw and gww fill chunk-aware and put the cursor back.  Vim's
 "       own gw skips 'formatexpr' by design, so in a noweb buffer it
 "       reflowed straight through chunk headers; it is now a mapping
