@@ -1022,9 +1022,10 @@ endfunction
 
 " 'formatexpr': fill v:lnum..v:lnum+v:count-1, chunk by chunk.
 function! noweb#format() abort
-  if v:char !=# ''
-    " Auto-wrapping as you type, one character at a time; the built-in
-    " formatter already stops at the chunk's blank lines.
+  if mode() =~# '^[iR]'
+    " Vim formatting on its own account, one line at a time: auto-wrap
+    " of the character in v:char, or the 'a' flag refilling after every
+    " change.  Leave that line to the built-in formatter.
     return 1
   endif
   let l:last = v:lnum + v:count - 1

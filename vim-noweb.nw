@@ -91,6 +91,10 @@ The plugin's lineage, version by version:
 \item[v1.8.3] typing [[]]]] in insert mode closes a quote again
   instead of leaving [[]^F]] behind: VimTeX's delimiter closer is
   unmapped for the prose (\cref{sec:vimtexprose}).
+\item[v1.8.4] typing past [['textwidth']] with the [[a]] flag in
+  [['formatoptions']] no longer scatters the characters over lines of
+  their own: the formatexpr now leaves every Insert-mode call to the
+  built-in formatter (\cref{sec:format}).
 \end{description}
 
 Versions 1.3 and 1.4 together amount to a complete rewrite: virtually
@@ -256,8 +260,8 @@ ignores it but archaeologists should not have to run [[git log]].
 " Language:		NOWEB
 " Author:		Xun GONG <minus273@BonBon.net>, Dirk Baechle <dl9obn@darc.de>
 " Maintainer:		Daniel Bosk <dbosk@kth.se>
-" Date:			2026-09-09
-" Version:		1.8.3
+" Date:			2026-09-14
+" Version:		1.8.4
 " Inspired by:		cweb.vim (Andreas Scherer) -> nw.vim -> vim-noweb
 
 " History
@@ -265,6 +269,12 @@ ignores it but archaeologists should not have to run [[git log]].
 " Versions 1.3 and 1.4 together amount to a complete rewrite:
 " virtually no code from v1.2 or earlier remains.
 "
+" v1.8.4: typing past 'textwidth' with the a flag in 'formatoptions'
+"       keeps the line whole.  Vim's auto-format calls 'formatexpr'
+"       once per keystroke with v:char empty, which the formatexpr
+"       took for a gq and answered by refilling the whole chunk from
+"       inside Vim's own formatting loop; every Insert-mode call now
+"       goes to the built-in formatter.
 " v1.8.3: ]] in insert mode closes a quote again.  VimTeX maps it to
 "       its delimiter closer, which inserts one ] plus a CTRL-F meant
 "       for a 'tex' indent script noweb buffers never load, so the
@@ -4377,11 +4387,12 @@ line.  Emacs has had an answer since v2.11:
 [[noweb-hide-code-quotes]] blanks out the quotes' contents so the
 filler cannot misread code punctuation as prose.
 
-Vim's hook for this is [['formatexpr']], which every formatting
-command routes through---[[gq]], [[gw]], and the automatic wrapping
-that [['formatoptions']] drives.  It is handed a range in [[v:lnum]]
-and [[v:count]] and returns non-zero to mean \enquote{never mind, do
-it the built-in way}.
+Vim's hook for this is [['formatexpr']], which [[gq]] and the
+automatic formatting that [['formatoptions']] drives route
+through---but not [[gw]], which keeps to the built-in formatter
+whatever the option says.  It is handed a range in [[v:lnum]] and
+[[v:count]] and returns non-zero to mean \enquote{never mind, do it
+the built-in way}.
 
 Two departures from Emacs are worth naming.  First, a range spanning
 several chunks is not clamped to the first one and quietly truncated;
@@ -4394,12 +4405,46 @@ quote, we stop it from \emph{breaking} one: a [[[[...]]]] quote is a
 single conceptual token, and a user who wrote one wants it whole.  The
 stronger guarantee subsumes the weaker one and is easier to state.
 
+Not every call is a [[gq]], though, and telling the others apart is
+where the first release of this function went wrong.  Vim also calls
+the formatexpr on its own account, from Insert mode, in two ways.
+Auto-wrap---the [[t]] flag---calls it for the one line the cursor is
+on when the character about to be inserted would push it past
+[['textwidth']], and announces itself by putting that character in
+[[v:char]].  The [[a]] flag is the other way: after \emph{every}
+change it refills the paragraph, and to do so it walks the paragraph
+line by line, calling the formatexpr for each line that is too long,
+with [[v:char]] empty, and with Vim switched into Insert mode for the
+duration even when the change was a Normal-mode [[dd]].  Both callers
+hand over one line and expect that line, and only that line, to be
+formatted in place; they are in the middle of a loop that goes on to
+the next line when the formatexpr returns.
+
+The first release tested [[v:char]] alone.  That caught auto-wrap but
+took the [[a]] flag's calls for a [[gq]] on one line, and answered
+each of them by refilling the whole chunk---hiding quotes, running
+[[gq]] over the piece, restoring the quotes---from inside Vim's own
+formatting loop, once per keystroke.  What came out depended on what
+else was loaded: on a bare Neovim the text happened to survive, at the
+price of a full chunk refill per character typed; with a few more
+plugins the cursor came back one column off, so [[succeeds]] typed at
+the end of a long line read [[su.cceeds]]; and with an
+[[InsertCharPre]] autocommand in the mix every character landed on a
+line of its own, in reverse order.  The test that does not depend on
+the caller's bookkeeping is the mode itself: a formatexpr entered in
+Insert or Replace mode is Vim formatting as it goes, and the built-in
+formatter, which already stops at the chunk's blank lines, is the
+right one for that.  The price is that a [[[[...]]]] quote can be
+broken by auto-wrap as it is typed; a later [[gq]] puts it back
+together.
+
 <<[[noweb#format]]>>=
 " 'formatexpr': fill v:lnum..v:lnum+v:count-1, chunk by chunk.
 function! noweb#format() abort
-  if v:char !=# ''
-    " Auto-wrapping as you type, one character at a time; the built-in
-    " formatter already stops at the chunk's blank lines.
+  if mode() =~# '^[iR]'
+    " Vim formatting on its own account, one line at a time: auto-wrap
+    " of the character in v:char, or the 'a' flag refilling after every
+    " change.  Leave that line to the built-in formatter.
     return 1
   endif
   let l:last = v:lnum + v:count - 1
@@ -5385,7 +5430,7 @@ mark so that |CTRL-O| returns:
     ][      next documentation chunk         []      previous
 
                                                         *noweb-formatting*
-|gq| and |gw| understand chunks.  A range covering several chunks is
+|gq| understands chunks.  A range covering several chunks is
 split at the boundaries and each piece filled inside its own chunk, so
 "gqG" never joins a paragraph onto a chunk header; and because a sweep
 like that means "tidy the prose", code chunks in a multi-chunk range
@@ -5395,6 +5440,11 @@ chunk rewraps them with their leaders.
 
 Blanks inside [[...]] quotes are protected for the duration of the
 fill, so a quote is never broken across two lines.
+
+Wrapping as you type and the 'a' flag of 'formatoptions' are left to
+Vim's built-in formatter, which can break a quote; gq puts it back
+together.  |gw| never consults 'formatexpr' and so knows nothing of
+chunks.
 
 |:NowebFillChunk| formats the whole chunk the cursor is in: filling it
 if it is prose, re-indenting it if it is code.

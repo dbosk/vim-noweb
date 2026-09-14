@@ -105,7 +105,7 @@ mark so that |CTRL-O| returns:
     ][      next documentation chunk         []      previous
 
                                                         *noweb-formatting*
-|gq| and |gw| understand chunks.  A range covering several chunks is
+|gq| understands chunks.  A range covering several chunks is
 split at the boundaries and each piece filled inside its own chunk, so
 "gqG" never joins a paragraph onto a chunk header; and because a sweep
 like that means "tidy the prose", code chunks in a multi-chunk range
@@ -115,6 +115,11 @@ chunk rewraps them with their leaders.
 
 Blanks inside [[...]] quotes are protected for the duration of the
 fill, so a quote is never broken across two lines.
+
+Wrapping as you type and the 'a' flag of 'formatoptions' are left to
+Vim's built-in formatter, which can break a quote; gq puts it back
+together.  |gw| never consults 'formatexpr' and so knows nothing of
+chunks.
 
 |:NowebFillChunk| formats the whole chunk the cursor is in: filling it
 if it is prose, re-indenting it if it is code.
