@@ -533,6 +533,14 @@ function M.preview(root, mods)
   vim.api.nvim_set_current_win(nwwin)
 end
 
+local probe
+local function textlocked()
+  if not (probe and vim.api.nvim_buf_is_valid(probe)) then
+    probe = vim.api.nvim_create_buf(false, true)
+  end
+  return not pcall(vim.api.nvim_buf_set_lines, probe, 0, -1, false, {})
+end
+
 function M.sync(nwbuf)
   nwbuf = (nwbuf and nwbuf ~= 0) and nwbuf or vim.api.nvim_get_current_buf()
   local st = state[nwbuf]
@@ -540,10 +548,9 @@ function M.sync(nwbuf)
     return nil
   end
   local tick = vim.api.nvim_buf_get_changedtick(nwbuf)
-  if st.tick == tick then
+  if st.tick == tick or textlocked() then
     return st
   end
-  st.tick = tick
   local roots = typed_roots(nwbuf)
   for root, sh in pairs(st.roots) do
     if not roots[root] then
@@ -576,6 +583,7 @@ function M.sync(nwbuf)
       end
     end
   end
+  st.tick = tick
   return st
 end
 
@@ -860,7 +868,8 @@ function M.setup(nwbuf)
   state[nwbuf] = { tick = -1, roots = {} }
   local group = vim.api.nvim_create_augroup('noweb-shadow:' .. nwbuf, {})
   local pending = false
-  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+  vim.api.nvim_create_autocmd(
+    { 'TextChanged', 'TextChangedI', 'InsertLeave' }, {
     group = group,
     buffer = nwbuf,
     callback = function()

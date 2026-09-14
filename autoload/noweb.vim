@@ -1022,9 +1022,10 @@ endfunction
 
 " 'formatexpr': fill v:lnum..v:lnum+v:count-1, chunk by chunk.
 function! noweb#format() abort
-  if v:char !=# ''
-    " Auto-wrapping as you type, one character at a time; the built-in
-    " formatter already stops at the chunk's blank lines.
+  if mode() =~# '^[iR]'
+    " Vim formatting on its own account, one line at a time: auto-wrap
+    " of the character in v:char, or the 'a' flag refilling after every
+    " change.  Leave that line to the built-in formatter.
     return 1
   endif
   let l:last = v:lnum + v:count - 1
@@ -1075,6 +1076,22 @@ function! noweb#fill_chunk() abort
     endif
   finally
     call winrestview(l:view)
+  endtry
+endfunction
+" Arm gw: remember the view while the cursor is still the user's, then
+" hand over to g@.  The mapping is <expr> so a count passes through.
+function! noweb#format_keep_op() abort
+  let s:keep_view = winsaveview()
+  set operatorfunc=noweb#format_keep
+  return 'g@'
+endfunction
+
+" gw's operator: gq over the operated lines, view put back.
+function! noweb#format_keep(type) abort
+  try
+    call s:normal_over(line("'["), line("']"), 'gq')
+  finally
+    call winrestview(s:keep_view)
   endtry
 endfunction
 

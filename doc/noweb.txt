@@ -105,7 +105,7 @@ mark so that |CTRL-O| returns:
     ][      next documentation chunk         []      previous
 
                                                         *noweb-formatting*
-|gq| and |gw| understand chunks.  A range covering several chunks is
+|gq| understands chunks.  A range covering several chunks is
 split at the boundaries and each piece filled inside its own chunk, so
 "gqG" never joins a paragraph onto a chunk header; and because a sweep
 like that means "tidy the prose", code chunks in a multi-chunk range
@@ -115,6 +115,15 @@ chunk rewraps them with their leaders.
 
 Blanks inside [[...]] quotes are protected for the duration of the
 fill, so a quote is never broken across two lines.
+
+Wrapping as you type and the 'a' flag of 'formatoptions' are left to
+Vim's built-in formatter, which can break a quote; gq puts it back
+together.
+
+gw and gww are mapped to do what gq does and then put the cursor back
+where it was -- by line and column, so after a reflow it may sit on a
+different word than Vim's own |gw| would have kept it on.  Vim's gw
+never consults 'formatexpr', which is why it is a mapping.
 
 |:NowebFillChunk| formats the whole chunk the cursor is in: filling it
 if it is prose, re-indenting it if it is code.
@@ -270,6 +279,7 @@ Default mappings, all buffer-local:
     ic ac iC aC             |noweb-textobjects|
     ]] [[ ]m [m ][ []       |noweb-motions|
     ]c [c                   |noweb-occurrences|
+    gw gww                  |noweb-formatting|
     K                       hover -- preview the chunk under the
                             cursor, or (Neovim) code documentation
     gd                      go to definition -- the chunk under the
@@ -289,6 +299,7 @@ The names are:
     <Plug>(noweb-next-doc-chunk)    <Plug>(noweb-prev-doc-chunk)
     <Plug>(noweb-next-occurrence)   <Plug>(noweb-prev-occurrence)
     <Plug>(noweb-hover)             <Plug>(noweb-definition)
+    <Plug>(noweb-format-keep)       <Plug>(noweb-format-keep-line)
 
 ==============================================================================
 vim:tw=78:ts=8:noet:ft=help:norl:
